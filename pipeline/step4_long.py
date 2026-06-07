@@ -429,10 +429,19 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                 except Exception: pass
         return str(seg_out) if ok and seg_out.exists() else None
 
-    # Build segments in parallel (8 workers)
-    with _cf.ThreadPoolExecutor(max_workers=8) as pool:
+    # Build segments in parallel — but cap workers to the machine's CPU count
+    # (max 3). Running 8 ffmpeg x264 encoders at 1080x1920 at once blows past a
+    # small VPS's RAM; the OOM killer then silently kills most of them, leaving
+    # only the simplest segment (the outro). Tune with the SEG_WORKERS env var.
+    import os as _os
+    _workers = int(_os.getenv("SEG_WORKERS", str(max(1, min(3, _os.cpu_count() or 2)))))
+    log.info(f"Building {len(segments)} segments with {_workers} parallel worker(s)")
+    with _cf.ThreadPoolExecutor(max_workers=_workers) as pool:
         seg_paths = list(pool.map(_make_seg, enumerate(segments)))
 
+    _ok_n = sum(1 for p in seg_paths if p)
+    log.info(f"Segments built: {_ok_n}/{len(segments)} ok"
+             + ("" if _ok_n == len(segments) else f"  (FAILED: {len(segments) - _ok_n})"))
     seg_paths = [p for p in seg_paths if p]
     if not seg_paths:
         log.error("Web long: no segments produced")
