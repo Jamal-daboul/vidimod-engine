@@ -1,0 +1,34 @@
+# ── vidimod engine settings ───────────────────────────────────────────────────
+# Copy this file to settings.py and fill in real keys. settings.py is gitignored
+# so secrets NEVER reach GitHub (Anthropic/Google auto-revoke leaked keys).
+
+import os
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+TOGETHER_API_KEY  = os.getenv("TOGETHER_API_KEY", "")
+PEXELS_API_KEY    = os.getenv("PEXELS_API_KEY", "")
+PIXABAY_API_KEY   = os.getenv("PIXABAY_API_KEY", "")
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_API_TOKEN  = os.getenv("CLOUDFLARE_API_TOKEN", "")
+
+# ── Content strategy ──────────────────────────────────────────────────────────
+CHANNEL_NICHE   = "interesting facts and top 10 lists"
+CHANNEL_TONE    = "energetic, surprising, engaging"
+CONTENT_FOCUS       = "long"
+LONG_VIDEOS_PER_DAY = 1
+SHORTS_PER_DAY      = 2
+VIDEOS_PER_DAY      = SHORTS_PER_DAY
+LONG_VIDEO_MINUTES  = 12
+CHANNEL_CONTENT_IDEA = ""
+
+# ── Video dimensions ──────────────────────────────────────────────────────────
+VIDEO_WIDTH    = 1080
+VIDEO_HEIGHT   = 1920
+FACTS_PER_VIDEO = 5
+LONG_VIDEO_WIDTH  = 1920
+LONG_VIDEO_HEIGHT = 1080

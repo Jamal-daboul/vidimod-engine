@@ -1,0 +1,30 @@
+# vidimod render engine — pinned to the versions proven on the dev PC.
+# These are the ONLY packages the video render path (steps 2 + 4 + subtitles)
+# actually needs. Kokoro/torch are intentionally omitted — English voice
+# auto-falls back to edge-tts when kokoro isn't installed (good for small VPS).
+
+moviepy==1.0.3
+imageio==2.37.3
+imageio-ffmpeg==0.6.0
+proglog==0.1.12
+decorator==4.4.2
+tqdm==4.67.3
+numpy==2.4.6
+Pillow==9.5.0
+
+# voice (edge-tts is online + light; works for Arabic, Turkish, and English)
+edge-tts==7.2.8
+soundfile==0.14.0
+
+# Arabic subtitle shaping (RTL)
+arabic-reshaper==3.0.1
+python-bidi==0.6.10
+
+# misc
+requests==2.34.2
+
+# google (used by some pipeline helpers)
+google-genai==2.6.0
+google-api-python-client==2.196.0
+google-auth-oauthlib==1.4.0
+google-auth-httplib2==0.4.0
