@@ -147,11 +147,13 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
 
     font  = font or "Arial"
     # Arabic/RTL: the assembler runs on Linux (VPS), where Arial/Tahoma don't exist,
-    # so libass falls back to a wide font (DejaVu) that renders Arabic horizontally
-    # stretched. We ship Tajawal (fonts/Tajawal-Bold.ttf) and libass loads it via
-    # `fontsdir=fonts`, so Arabic always renders with correct metrics on any OS.
+    # so libass falls back to a wide font (DejaVu) that renders Arabic stretched, and
+    # narrower fonts miss glyphs (tofu boxes). We ship Noto Sans Arabic — Google's
+    # reference Arabic font with COMPLETE coverage and a neutral Tahoma/Arial-like
+    # look — and libass loads it via `fontsdir=fonts`, so Arabic always renders
+    # correctly (no stretch, no boxes) on any OS.
     if _is_rtl(text):
-        font = "Tajawal"
+        font = "Noto Sans Arabic"
     style = style if style in ("classic", "karaoke", "word", "active") else "classic"
     align, margin_v = _placement(v_pct, smart, position, img_path, H)
 
