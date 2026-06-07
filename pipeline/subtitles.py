@@ -86,6 +86,11 @@ def _shape_visual(text: str) -> str:
 # Fonts with no Arabic glyphs — used for Arabic text they'd render boxes (tofu).
 _LATIN_ONLY_FONTS = {"Impact", "Arial Black", "Bahnschrift"}
 
+# Bundled fonts (fonts/) that fully cover Arabic — for these we honor the user's
+# choice on RTL text; any other font on RTL falls back to Noto Sans Arabic.
+_ARABIC_FONTS = {"Noto Sans Arabic", "Cairo", "Tajawal", "Almarai", "Amiri",
+                 "Changa", "Reem Kufi", "El Messiri"}
+
 
 def _is_rtl(text: str) -> bool:
     """True if the text contains Arabic/Hebrew (right-to-left) characters."""
@@ -145,14 +150,12 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
     if (not text and not words) or duration <= 0:
         return None
 
-    font  = font or "Arial"
-    # Arabic/RTL: the assembler runs on Linux (VPS), where Arial/Tahoma don't exist,
-    # so libass falls back to a wide font (DejaVu) that renders Arabic stretched, and
-    # narrower fonts miss glyphs (tofu boxes). We ship Noto Sans Arabic — Google's
-    # reference Arabic font with COMPLETE coverage and a neutral Tahoma/Arial-like
-    # look — and libass loads it via `fontsdir=fonts`, so Arabic always renders
-    # correctly (no stretch, no boxes) on any OS.
-    if _is_rtl(text):
+    font  = font or "Noto Sans Arabic"
+    # Arabic/RTL: keep the user's chosen font IF it covers Arabic; otherwise fall back
+    # to Noto Sans Arabic (complete coverage) so Arabic never renders stretched or as
+    # tofu boxes. All these fonts ship in fonts/ and libass loads them via
+    # `fontsdir=fonts`, so the choice works on any OS (no system font needed).
+    if _is_rtl(text) and font not in _ARABIC_FONTS:
         font = "Noto Sans Arabic"
     style = style if style in ("classic", "karaoke", "word", "active") else "classic"
     align, margin_v = _placement(v_pct, smart, position, img_path, H)
