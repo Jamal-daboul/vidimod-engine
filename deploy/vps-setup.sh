@@ -14,7 +14,8 @@ echo "==> 1/7  System packages (ffmpeg, python venv, fonts)…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y ffmpeg python3-venv python3-pip git \
-                   fonts-noto-core fonts-noto-cjk fonts-dejavu
+                   fonts-noto-core fonts-noto-cjk fonts-dejavu \
+                   libjpeg-dev zlib1g-dev libfreetype6-dev
 # Microsoft fonts (real Arial, has Arabic glyphs) — accept EULA, non-fatal if it fails
 echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections
 apt-get install -y ttf-mscorefonts-installer || echo "   (mscorefonts skipped — Noto will be used)"

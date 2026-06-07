@@ -10,7 +10,9 @@ proglog==0.1.12
 decorator==4.4.2
 tqdm==4.67.3
 numpy==2.4.6
-Pillow==9.5.0
+# Pillow 10.4 ships prebuilt wheels for Python 3.12 (no compiling / no jpeg headers).
+# moviepy 1.0.3's removed-ANTIALIAS reference is handled by the shim in pipeline/__init__.py.
+Pillow==10.4.0
 
 # voice (edge-tts is online + light; works for Arabic, Turkish, and English)
 edge-tts==7.2.8
