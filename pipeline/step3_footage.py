@@ -11,8 +11,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-from config.settings import PIXABAY_API_KEY
-TOGETHER_API_KEY = "tgp_v1_A65HYGTcNd4nTSuVVEDjPPWpQ2a_qNbNmDQ_u9OlzNs"
+from config.settings import PIXABAY_API_KEY, TOGETHER_API_KEY
 
 _STOPWORDS = {
     "the","a","an","is","was","were","are","that","this","and","or","but",
