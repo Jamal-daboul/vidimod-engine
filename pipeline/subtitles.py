@@ -146,10 +146,12 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
         return None
 
     font  = font or "Arial"
-    # Arabic/RTL: heavy Latin-only display fonts have no Arabic glyphs → boxes (tofu).
-    # Swap to Arial (full Arabic) so the text renders instead of empty rectangles.
-    if _is_rtl(text) and font in _LATIN_ONLY_FONTS:
-        font = "Arial"
+    # Arabic/RTL: the assembler runs on Linux (VPS), where Arial/Tahoma don't exist,
+    # so libass falls back to a wide font (DejaVu) that renders Arabic horizontally
+    # stretched. We ship Tajawal (fonts/Tajawal-Bold.ttf) and libass loads it via
+    # `fontsdir=fonts`, so Arabic always renders with correct metrics on any OS.
+    if _is_rtl(text):
+        font = "Tajawal"
     style = style if style in ("classic", "karaoke", "word", "active") else "classic"
     align, margin_v = _placement(v_pct, smart, position, img_path, H)
 
