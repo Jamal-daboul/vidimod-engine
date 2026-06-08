@@ -25,20 +25,24 @@ RATE = "+15%"
 CONCURRENCY  = 3
 MAX_ATTEMPTS = 3          # streamed attempts before falling back to plain save()
 
+# Male + female voice per language so the user's gender choice actually changes the
+# narration. voice_sex comes from the account's setup ("male" / "female").
 LANG_VOICES = {
-    "Arabic":  "ar-SA-HamedNeural",
-    "English": "en-US-AndrewNeural",
-    "Turkish": "tr-TR-AhmetNeural",
-    "Spanish": "es-ES-AlvaroNeural",
-    "French":  "fr-FR-HenriNeural",
-    "German":  "de-DE-ConradNeural",
-    "Hindi":   "hi-IN-MadhurNeural",
+    "Arabic":  {"male": "ar-SA-HamedNeural",  "female": "ar-SA-ZariyahNeural"},
+    "English": {"male": "en-US-AndrewNeural",  "female": "en-US-AriaNeural"},
+    "Turkish": {"male": "tr-TR-AhmetNeural",   "female": "tr-TR-EmelNeural"},
+    "Spanish": {"male": "es-ES-AlvaroNeural",  "female": "es-ES-ElviraNeural"},
+    "French":  {"male": "fr-FR-HenriNeural",   "female": "fr-FR-DeniseNeural"},
+    "German":  {"male": "de-DE-ConradNeural",  "female": "de-DE-KatjaNeural"},
+    "Hindi":   {"male": "hi-IN-MadhurNeural",  "female": "hi-IN-SwaraNeural"},
 }
 
 
 def _pick_voice(script: dict) -> str:
     lang = script.get("language", "English")
-    return LANG_VOICES.get(lang, LANG_VOICES["English"])
+    sex  = (script.get("voice_sex") or "female").lower()
+    pair = LANG_VOICES.get(lang, LANG_VOICES["English"])
+    return pair.get(sex, pair["female"])
 
 
 def _attempt_timeout(text: str) -> float:
