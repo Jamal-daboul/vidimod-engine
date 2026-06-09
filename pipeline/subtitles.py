@@ -94,17 +94,20 @@ _LATIN_ONLY_FONTS = {"Impact", "Arial Black", "Bahnschrift"}
 
 # Bundled fonts (fonts/) that fully cover Arabic — for these we honor the user's
 # choice on RTL text; any other font on RTL falls back to Noto Sans Arabic.
-_ARABIC_FONTS = {"Noto Sans Arabic", "Cairo", "Tajawal", "Almarai", "Amiri",
-                 "Changa", "Reem Kufi", "El Messiri"}
+# Render-verified Arabic roster. EVERY family here was confirmed by an actual
+# libass render (frame inspected) + a fontTools glyph audit to carry the complete
+# Arabic repertoire including the legacy presentation forms (U+FB50–U+FEFF) that
+# libass needs. The previous Google-Fonts variable builds (Cairo / Tajawal /
+# Almarai / Changa / Reem Kufi / El Messiri) lack alef-isolated (U+FE8D) and
+# alef-hamza (U+FE83) — every alef rendered as a tofu box — and were removed.
+# A saved font name that is no longer in this set falls back to Noto Sans Arabic.
+_ARABIC_FONTS = {"Noto Sans Arabic", "Noto Kufi Arabic", "Noto Naskh Arabic",
+                 "IBM Plex Sans Arabic", "Amiri"}
 
-# Fonts verified (fontTools cmap audit of the bundled files) to contain the FULL
-# legacy Arabic presentation-forms repertoire (U+FB50–U+FEFF). This matters because
-# a libass built WITHOUT HarfBuzz (e.g. the static imageio-ffmpeg Linux binary)
-# falls back to its FriBidi "simple" shaper, which maps Arabic letters to those
-# legacy codepoints and looks them up directly in the font's cmap. Cairo/Tajawal/
-# Almarai/Changa/El Messiri are missing alef-isolated (U+FE8D) and alef-hamza
-# (U+FE83) — so EVERY alef renders as a tofu box. Reem Kufi has none at all.
-_LEGACY_SAFE_ARABIC = {"Noto Sans Arabic", "Amiri"}
+# All bundled Arabic fonts are legacy-complete now, so this equals _ARABIC_FONTS;
+# kept as a separate set so future additions must prove themselves before being
+# trusted on a renderer whose libass lacks HarfBuzz (simple shaper).
+_LEGACY_SAFE_ARABIC = set(_ARABIC_FONTS)
 
 _HB_CACHE = {}
 
