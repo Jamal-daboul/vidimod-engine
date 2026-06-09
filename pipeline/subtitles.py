@@ -155,8 +155,15 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
     # to Noto Sans Arabic (complete coverage) so Arabic never renders stretched or as
     # tofu boxes. All these fonts ship in fonts/ and libass loads them via
     # `fontsdir=fonts`, so the choice works on any OS (no system font needed).
-    if _is_rtl(text) and font not in _ARABIC_FONTS:
-        font = "Noto Sans Arabic"
+    if _is_rtl(text):
+        if font not in _ARABIC_FONTS:
+            font = "Noto Sans Arabic"
+    else:
+        # Latin/English: an Arabic font (e.g. Noto Sans Arabic) renders Latin letters
+        # and DIGITS at mismatched sizes (numbers look smaller). Use a clean Latin
+        # display font instead so "Diving at 500" looks uniform.
+        if font in _ARABIC_FONTS:
+            font = "Montserrat"
     style = style if style in ("classic", "karaoke", "word", "active") else "classic"
     align, margin_v = _placement(v_pct, smart, position, img_path, H)
 
