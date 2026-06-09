@@ -107,17 +107,54 @@ def _renderer_has_harfbuzz() -> bool:
     """True if the ffmpeg that will burn the subtitles has libass with HarfBuzz
     (proper OpenType Arabic shaping — any font works). False → libass's simple
     shaper needs legacy presentation-form glyphs, so only _LEGACY_SAFE_ARABIC
-    fonts render Arabic without boxes. Detected once per process from
-    `ffmpeg -buildconf`; on any doubt we return False (the safe assumption)."""
+    fonts render Arabic without boxes. On any doubt we return False (safe).
+
+    Detection (once per process):
+      1. `ffmpeg -buildconf` contains --enable-libharfbuzz → static builds.
+      2. Otherwise PROBE: render one tiny frame of Arabic ASS to a null sink with
+         verbose logging — libass announces its shaper: '... HarfBuzz-ng (COMPLEX)'
+         vs '(SIMPLE)'. This is the only reliable signal on distro ffmpeg builds,
+         where libass+HarfBuzz are shared libs invisible to ffmpeg's buildconf."""
     if "v" in _HB_CACHE:
         return _HB_CACHE["v"]
     ok = False
     try:
-        import subprocess
+        import subprocess, os, tempfile
         from pipeline.step4_long import _get_ffmpeg   # lazy: avoids import cycle
-        r = subprocess.run([_get_ffmpeg(), "-hide_banner", "-buildconf"],
+        ff = _get_ffmpeg()
+        r = subprocess.run([ff, "-hide_banner", "-buildconf"],
                            capture_output=True, text=True, timeout=20)
-        ok = "--enable-libharfbuzz" in (r.stdout or "") + (r.stderr or "")
+        if "--enable-libharfbuzz" in (r.stdout or "") + (r.stderr or ""):
+            ok = True
+        else:
+            probe_ass = (
+                "[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, Alignment\n"
+                "Style: Default,Arial,20,&H00FFFFFF&,2\n\n"
+                "[Events]\n"
+                "Format: Layer, Start, End, Style, Text\n"
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,سلام\n"
+            )
+            # Relative path in CWD → no Windows drive-colon escaping issues in the
+            # filter argument (the engine always chdirs to the william dir).
+            name = "_hb_probe.ass"
+            with open(name, "w", encoding="utf-8") as f:
+                f.write(probe_ass)
+            try:
+                p = subprocess.run(
+                    [ff, "-v", "verbose", "-f", "lavfi",
+                     "-i", "color=c=black:s=64x64:d=0.2",
+                     "-vf", f"subtitles={name}", "-frames:v", "1", "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=30)
+                log_txt = (p.stderr or "") + (p.stdout or "")
+                # libass logs e.g. "Shaper: FriBidi 1.0.16 (SIMPLE) HarfBuzz-ng
+                # 10.0.1 (COMPLEX)" — the (COMPLEX) marker only appears when the
+                # HarfBuzz shaper is actually compiled in.
+                ok = "(COMPLEX)" in log_txt
+            finally:
+                try: os.remove(name)
+                except Exception: pass
     except Exception:
         ok = False
     _HB_CACHE["v"] = ok
