@@ -91,6 +91,38 @@ _LATIN_ONLY_FONTS = {"Impact", "Arial Black", "Bahnschrift"}
 _ARABIC_FONTS = {"Noto Sans Arabic", "Cairo", "Tajawal", "Almarai", "Amiri",
                  "Changa", "Reem Kufi", "El Messiri"}
 
+# Fonts verified (fontTools cmap audit of the bundled files) to contain the FULL
+# legacy Arabic presentation-forms repertoire (U+FB50–U+FEFF). This matters because
+# a libass built WITHOUT HarfBuzz (e.g. the static imageio-ffmpeg Linux binary)
+# falls back to its FriBidi "simple" shaper, which maps Arabic letters to those
+# legacy codepoints and looks them up directly in the font's cmap. Cairo/Tajawal/
+# Almarai/Changa/El Messiri are missing alef-isolated (U+FE8D) and alef-hamza
+# (U+FE83) — so EVERY alef renders as a tofu box. Reem Kufi has none at all.
+_LEGACY_SAFE_ARABIC = {"Noto Sans Arabic", "Amiri"}
+
+_HB_CACHE = {}
+
+
+def _renderer_has_harfbuzz() -> bool:
+    """True if the ffmpeg that will burn the subtitles has libass with HarfBuzz
+    (proper OpenType Arabic shaping — any font works). False → libass's simple
+    shaper needs legacy presentation-form glyphs, so only _LEGACY_SAFE_ARABIC
+    fonts render Arabic without boxes. Detected once per process from
+    `ffmpeg -buildconf`; on any doubt we return False (the safe assumption)."""
+    if "v" in _HB_CACHE:
+        return _HB_CACHE["v"]
+    ok = False
+    try:
+        import subprocess
+        from pipeline.step4_long import _get_ffmpeg   # lazy: avoids import cycle
+        r = subprocess.run([_get_ffmpeg(), "-hide_banner", "-buildconf"],
+                           capture_output=True, text=True, timeout=20)
+        ok = "--enable-libharfbuzz" in (r.stdout or "") + (r.stderr or "")
+    except Exception:
+        ok = False
+    _HB_CACHE["v"] = ok
+    return ok
+
 
 def _is_rtl(text: str) -> bool:
     """True if the text contains Arabic/Hebrew (right-to-left) characters."""
@@ -158,10 +190,11 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
     if _is_rtl(text):
         if font not in _ARABIC_FONTS:
             font = "Noto Sans Arabic"
+        elif font not in _LEGACY_SAFE_ARABIC and not _renderer_has_harfbuzz():
+            # This renderer's libass has no HarfBuzz → simple shaper → the chosen
+            # font's missing legacy forms (alef!) would render as tofu boxes.
+            font = "Noto Sans Arabic"
     else:
-        # Latin/English: an Arabic font (e.g. Noto Sans Arabic) renders Latin letters
-        # and DIGITS at mismatched sizes (numbers look smaller). Use a clean Latin
-        # display font instead so "Diving at 500" looks uniform.
         if font in _ARABIC_FONTS:
             font = "Montserrat"
     style = style if style in ("classic", "karaoke", "word", "active") else "classic"
