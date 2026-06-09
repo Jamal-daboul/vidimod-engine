@@ -35,6 +35,23 @@ _CLAUSE_BREAKS = {
 
 # ── Subtitle helpers ──────────────────────────────────────────────────────────
 
+def _pil_arabic_mode() -> str:
+    """How Arabic must be drawn with this Pillow install.
+    'raqm'  → Pillow has the Raqm layout engine (bundled in Linux wheels since 8.2):
+              draw the RAW logical text with direction='rtl' and let HarfBuzz shape
+              it. REQUIRED for modern fonts like Noto Sans Arabic, which contain no
+              legacy presentation-form codepoints — pre-shaped text renders as tofu
+              boxes (final-alef, lam-alef…) on exactly those fonts.
+    'shape' → no Raqm: pre-shape into presentation forms ourselves (arabic_reshaper
+              + bidi) and draw with a font that still carries those legacy glyphs
+              (Amiri does; Noto/Cairo/Tajawal don't)."""
+    try:
+        from PIL import features
+        return 'raqm' if features.check('raqm') else 'shape'
+    except Exception:
+        return 'shape'
+
+
 def _load_bold_font(size: int, text: str = ""):
     from PIL import ImageFont
     import os
@@ -44,13 +61,24 @@ def _load_bold_font(size: int, text: str = ""):
     if is_ar:
         # Arabic needs a font that actually contains Arabic glyphs — DejaVu / Arial-bold
         # on a headless Linux box don't, so they render tofu boxes. Use the bundled
-        # Arabic fonts (these ship in the engine's fonts/ folder).
-        candidates += [
-            os.path.join(fonts_dir, "NotoSansArabic-Bold.ttf"),
-            os.path.join(fonts_dir, "Cairo.ttf"),
-            os.path.join(fonts_dir, "Tajawal.ttf"),
-            os.path.join(fonts_dir, "Almarai.ttf"),
-        ]
+        # Arabic fonts (these ship in the engine's fonts/ folder). Which one comes
+        # first depends on HOW we draw (see _pil_arabic_mode): Raqm shapes modern
+        # fonts (Noto) from raw text; the manual pre-shape path needs the legacy
+        # presentation-form glyphs that only Amiri still includes.
+        if _pil_arabic_mode() == 'raqm':
+            candidates += [
+                os.path.join(fonts_dir, "NotoSansArabic-Bold.ttf"),
+                os.path.join(fonts_dir, "Cairo.ttf"),
+                os.path.join(fonts_dir, "Tajawal.ttf"),
+                os.path.join(fonts_dir, "Almarai.ttf"),
+            ]
+        else:
+            candidates += [
+                os.path.join(fonts_dir, "Amiri.ttf"),
+                os.path.join(fonts_dir, "NotoSansArabic-Bold.ttf"),
+                os.path.join(fonts_dir, "Cairo.ttf"),
+                os.path.join(fonts_dir, "Tajawal.ttf"),
+            ]
     candidates += [
         "arialbd.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
@@ -160,15 +188,30 @@ def apply_subtitles_to_clip(clip, text: str, audio_duration: float):
     sub_y    = int(H * SUBTITLE_Y_RATIO)
     word_dur = audio_duration / max(len(text.split()), 1)
 
+    # Arabic strategy (see _pil_arabic_mode): with Raqm we pass the RAW logical text
+    # plus direction='rtl' and HarfBuzz shapes it against the font's OpenType tables.
+    # Pre-shaping in that mode produces presentation-form codepoints that modern
+    # Arabic fonts simply don't contain → tofu boxes. Only the no-Raqm fallback
+    # pre-shapes (with Amiri, which still has those legacy glyphs).
+    is_ar   = any('؀' <= c <= 'ۿ' for c in (text or ""))
+    mode    = _pil_arabic_mode()
+    draw_kw = {'direction': 'rtl', 'language': 'ar'} if (is_ar and mode == 'raqm') else {}
+
     # Pre-compute timing and x-position for every chunk
     timed_chunks = []   # (t_start, t_end, label, x)
     cursor = 0.0
     for label, wcount in chunk_pairs:
         dur = word_dur * wcount
-        label = _ar_shape(label)   # join + RTL Arabic so PIL renders it (no libass here)
+        if is_ar and mode == 'shape':
+            label = _ar_shape(label)   # manual join + RTL (no Raqm available)
 
         tmp  = PILImage.new("RGB", (1, 1))
-        bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
+        try:
+            bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font, **draw_kw)
+        except Exception:
+            draw_kw = {}
+            label   = _ar_shape(label) if is_ar else label
+            bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
         tw   = bbox[2] - bbox[0]
         x    = max(0, (W - tw) // 2 - sw)
 
@@ -191,7 +234,7 @@ def apply_subtitles_to_clip(clip, text: str, audio_duration: float):
 
         # Measure height to vertically center the text block on sub_y
         tmp  = PILImage.new("RGB", (1, 1))
-        bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
+        bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font, **draw_kw)
         th   = bbox[3] - bbox[1]
         y    = sub_y - th // 2
 
@@ -200,6 +243,7 @@ def apply_subtitles_to_clip(clip, text: str, audio_duration: float):
             fill=(255, 255, 255),
             stroke_width=sw,
             stroke_fill=(0, 0, 0),
+            **draw_kw,
         )
         return np.array(img)
 
