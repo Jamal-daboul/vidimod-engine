@@ -35,11 +35,26 @@ _CLAUSE_BREAKS = {
 
 # ── Subtitle helpers ──────────────────────────────────────────────────────────
 
-def _load_bold_font(size: int):
+def _load_bold_font(size: int, text: str = ""):
     from PIL import ImageFont
-    candidates = [
+    import os
+    fonts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts")
+    is_ar = any('؀' <= c <= 'ۿ' for c in (text or ""))
+    candidates = []
+    if is_ar:
+        # Arabic needs a font that actually contains Arabic glyphs — DejaVu / Arial-bold
+        # on a headless Linux box don't, so they render tofu boxes. Use the bundled
+        # Arabic fonts (these ship in the engine's fonts/ folder).
+        candidates += [
+            os.path.join(fonts_dir, "NotoSansArabic-Bold.ttf"),
+            os.path.join(fonts_dir, "Cairo.ttf"),
+            os.path.join(fonts_dir, "Tajawal.ttf"),
+            os.path.join(fonts_dir, "Almarai.ttf"),
+        ]
+    candidates += [
         "arialbd.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
+        os.path.join(fonts_dir, "Montserrat.ttf"),
         "arial.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "DejaVuSans-Bold.ttf",
@@ -51,6 +66,20 @@ def _load_bold_font(size: int):
         except Exception:
             pass
     return ImageFont.load_default()
+
+
+def _ar_shape(s: str) -> str:
+    """Reshape + bidi Arabic so PIL can draw it correctly. PIL has no Arabic shaper
+    (unless libraqm is present), so we join the letters into their presentation forms
+    and apply visual RTL order ourselves. Latin text is returned unchanged."""
+    if not any('؀' <= c <= 'ۿ' for c in (s or "")):
+        return s
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        return get_display(arabic_reshaper.reshape(s))
+    except Exception:
+        return s
 
 
 def _smart_chunks(text: str, audio_duration: float) -> list:
@@ -126,7 +155,7 @@ def apply_subtitles_to_clip(clip, text: str, audio_duration: float):
     if not chunk_pairs:
         return clip
 
-    font     = _load_bold_font(SUBTITLE_FONT_SIZE)
+    font     = _load_bold_font(SUBTITLE_FONT_SIZE, text)
     sw       = SUBTITLE_STROKE
     sub_y    = int(H * SUBTITLE_Y_RATIO)
     word_dur = audio_duration / max(len(text.split()), 1)
@@ -136,6 +165,7 @@ def apply_subtitles_to_clip(clip, text: str, audio_duration: float):
     cursor = 0.0
     for label, wcount in chunk_pairs:
         dur = word_dur * wcount
+        label = _ar_shape(label)   # join + RTL Arabic so PIL renders it (no libass here)
 
         tmp  = PILImage.new("RGB", (1, 1))
         bbox = ImageDraw.Draw(tmp).textbbox((0, 0), label, font=font)
