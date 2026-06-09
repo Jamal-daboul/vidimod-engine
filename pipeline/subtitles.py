@@ -39,6 +39,12 @@ def _clean(text: str) -> str:
     whitespace (tabs/newlines → single space). Punctuation & a stray tab were the
     two culprits behind boxes and the dropped line."""
     import unicodedata, re
+    # NFKC first: folds legacy Arabic presentation-form codepoints (U+FB50–U+FEFF —
+    # e.g. pre-shaped text that leaked into a stored script/plan, or pasted from a
+    # PDF) back to ordinary letters. Most modern Arabic fonts have NO glyphs for
+    # those codepoints, so without this they render as tofu boxes no matter which
+    # font or renderer is used. HarfBuzz re-shapes the folded text correctly.
+    text = unicodedata.normalize("NFKC", text or "")
     kept = []
     for c in (text or ""):
         o = ord(c)
