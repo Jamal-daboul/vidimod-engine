@@ -276,6 +276,11 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
     if align in (7, 8, 9):      pos_y = margin_v
     elif align in (4, 5, 6):    pos_y = H // 2
     else:                       pos_y = H - margin_v
+    # Shorts (portrait): YouTube overlays the channel name / handle along the bottom,
+    # which was covering the subtitles. Never let them sit below ~78% of the height
+    # so they stay clearly above that UI. Landscape (long videos) is unaffected.
+    if H > W:
+        pos_y = min(pos_y, int(H * 0.78))
     pos_tag = "{\\pos(%d,%d)}" % (pos_x, pos_y)
 
     scale   = max(0.3, min(2.2, float(font_scale or 1.0)))
@@ -356,10 +361,16 @@ def _chunk_words(words, max_words: int, max_chars: int):
     breaking early after soft punctuation. Returns lists of word indices."""
     chunks, cur, cur_chars = [], [], 0
     for i, w in enumerate(words):
+        wlen = len(w["text"]) + 1
+        # Check BEFORE adding: if this word would overflow the line (too many words
+        # or too many characters), flush the current chunk first so the word moves to
+        # the NEXT chunk instead of pushing this line off-screen. A single word longer
+        # than the cap still gets its own chunk (a word can't be split).
+        if cur and (len(cur) >= max_words or cur_chars + wlen > max_chars):
+            chunks.append(cur); cur, cur_chars = [], 0
         cur.append(i)
-        cur_chars += len(w["text"]) + 1
-        if (len(cur) >= max_words or cur_chars >= max_chars
-                or w["text"].endswith(_BREAK_AFTER)):
+        cur_chars += wlen
+        if w["text"].endswith(_BREAK_AFTER):
             chunks.append(cur); cur, cur_chars = [], 0
     if cur:
         chunks.append(cur)
