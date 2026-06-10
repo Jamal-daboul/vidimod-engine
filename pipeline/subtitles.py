@@ -103,7 +103,16 @@ _LATIN_ONLY_FONTS = {"Impact", "Arial Black", "Bahnschrift"}
 # A saved font name that is no longer in this set falls back to Noto Sans Arabic.
 _ARABIC_FONTS = {"Noto Sans Arabic", "Noto Kufi Arabic", "Noto Naskh Arabic",
                  "IBM Plex Sans Arabic", "Amiri",
-                 "Droid Arabic Kufi", "Droid Arabic Naskh", "Vazirmatn"}
+                 "Droid Arabic Kufi", "Droid Arabic Naskh", "Vazirmatn",
+                 # "VM" families: modern Google fonts forged in-house — the legacy
+                 # presentation-form codepoints were wired (via HarfBuzz shaping
+                 # discovery) onto each font's own positional glyphs, so they pass
+                 # the same render audit as the rest. (Renamed per OFL RFN rules.)
+                 "Cairo VM", "Tajawal VM", "Almarai VM", "Changa VM",
+                 "El Messiri VM", "Alexandria VM", "Readex Pro VM", "Zain VM",
+                 "Beiruti VM", "Mirza VM", "Katibeh VM", "Rakkas VM",
+                 "Lalezar VM", "Marhey VM", "Lemonada VM",
+                 "Baloo Bhaijaan 2 VM", "Markazi Text VM"}
 
 # All bundled Arabic fonts are legacy-complete now, so this equals _ARABIC_FONTS;
 # kept as a separate set so future additions must prove themselves before being
