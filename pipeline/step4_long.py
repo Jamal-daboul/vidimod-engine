@@ -368,6 +368,18 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                 sub_filter = (f",subtitles={ass_rel}:fontsdir=fonts"
                               if Path("fonts").is_dir() else f",subtitles={ass_rel}")
 
+        # Outro → burn a simple centered "SUBSCRIBE" call-to-action (red pill, white
+        # bold text). English wording is the universal YouTube convention and keeps
+        # drawtext away from Arabic shaping. Drawn last so it sits on top.
+        btn = ""
+        if seg.get("type") == "outro":
+            _fs  = max(44, min(vid_w, vid_h) // 13)
+            _pad = _fs // 2
+            _fp  = "fonts/Anton.ttf" if Path("fonts/Anton.ttf").exists() else "fonts/Montserrat.ttf"
+            btn = (f",drawtext=fontfile={_fp}:text='SUBSCRIBE':fontcolor=white:"
+                   f"fontsize={_fs}:box=1:boxcolor=0xCC0000@0.95:boxborderw={_pad}:"
+                   f"x=(w-text_w)/2:y=(h-text_h)/2")
+
         # No per-shot fade — a fade-IN from black flashed dark at every image switch.
         # Transitions are handled at concat time (crossfade dissolve, no black).
         fade_f = ""
@@ -391,7 +403,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             vf = (
                 f"scale={uw}:{uh}:force_original_aspect_ratio=increase,crop={uw}:{uh},"
                 f"zoompan=z='{z}':x='{cx}{xo}':y='{cy}':"
-                f"d=1:s={vid_w}x{vid_h}:fps={FPS}" + sub_filter + fade_f
+                f"d=1:s={vid_w}x{vid_h}:fps={FPS}" + sub_filter + fade_f + btn
             )
             cmd = [ff, "-y",
                    "-loop", "1", "-framerate", "25", "-i", str(img_path),
@@ -401,7 +413,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-r", "25", "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
         else:
-            vf = f"format=yuv420p{sub_filter}{fade_f}"
+            vf = f"format=yuv420p{sub_filter}{fade_f}{btn}"
             cmd = [ff, "-y",
                    "-f", "lavfi", "-i", f"color=c=black:size={vid_w}x{vid_h}:rate=25",
                    "-i", str(audio_path), "-vf", vf,
