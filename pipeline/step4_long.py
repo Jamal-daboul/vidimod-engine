@@ -183,19 +183,7 @@ def _run_ffmpeg(cmd: list, timeout: int = 120) -> bool:
 
 def _media_duration(ff: str, path) -> float:
     """Duration (seconds) of any media file, from the container header."""
-    import subprocess, re, shutil
-    # Prefer ffprobe — returns a clean machine-readable number, no stderr parsing.
-    probe = shutil.which("ffprobe")
-    if probe:
-        try:
-            out = subprocess.run(
-                [probe, "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-                capture_output=True, text=True).stdout.strip()
-            if out:
-                return float(out)
-        except Exception:
-            pass
+    import subprocess, re
     try:
         info = subprocess.run([ff, "-i", str(path)], capture_output=True, text=True).stderr
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", info)
@@ -226,8 +214,7 @@ def _xfade_concat(ff: str, seg_paths: list, out_path, t: float = 0.3) -> bool:
     cmd = ([ff, "-y"] + inputs +
            ["-filter_complex", ";".join(filters), "-map", vlab, "-map", alab,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "25", "-r", "25",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_path)])
+            "-c:a", "aac", "-b:a", "160k", str(out_path)])
     return _run_ffmpeg(cmd, timeout=max(600, len(seg_paths) * 30))
 
 
@@ -423,25 +410,17 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-shortest", str(seg_out)]
 
         ok = _run_ffmpeg(cmd, timeout=300)   # 5 min max per segment
-        for tmp in (Path(ass_rel) if ass_rel else None, tmp_audio):
-            if tmp:
-                try: tmp.unlink()
-                except Exception: pass
+        # Keep the .ass files (pruned below) — they're the only ground truth for
+        # diagnosing subtitle rendering issues via /api/debug/last-ass.
+        if tmp_audio:
+            try: tmp_audio.unlink()
+            except Exception: pass
         return str(seg_out) if ok and seg_out.exists() else None
 
-    # Build segments in parallel — but cap workers to the machine's CPU count
-    # (max 3). Running 8 ffmpeg x264 encoders at 1080x1920 at once blows past a
-    # small VPS's RAM; the OOM killer then silently kills most of them, leaving
-    # only the simplest segment (the outro). Tune with the SEG_WORKERS env var.
-    import os as _os
-    _workers = int(_os.getenv("SEG_WORKERS", str(max(1, min(3, _os.cpu_count() or 2)))))
-    log.info(f"Building {len(segments)} segments with {_workers} parallel worker(s)")
-    with _cf.ThreadPoolExecutor(max_workers=_workers) as pool:
+    # Build segments in parallel (8 workers)
+    with _cf.ThreadPoolExecutor(max_workers=8) as pool:
         seg_paths = list(pool.map(_make_seg, enumerate(segments)))
 
-    _ok_n = sum(1 for p in seg_paths if p)
-    log.info(f"Segments built: {_ok_n}/{len(segments)} ok"
-             + ("" if _ok_n == len(segments) else f"  (FAILED: {len(segments) - _ok_n})"))
     seg_paths = [p for p in seg_paths if p]
     if not seg_paths:
         log.error("Web long: no segments produced")
@@ -465,17 +444,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
     if transitions and 2 <= len(seg_paths) <= 16:
         ok = _xfade_concat(ff, seg_paths, concat_out, t=0.3)     # dissolve (short videos)
     if not ok:
-        # Hard-cut concat. Re-encode the VIDEO (do NOT stream-copy): segments are
-        # encoded independently, so copying them into one mp4 leaves discontinuous
-        # timestamps/headers that many players (browser <video>, and YouTube) only
-        # partially decode — which is exactly what showed up as "only the outro
-        # plays". A full re-encode produces one clean, continuous, universally
-        # playable H.264 stream. +faststart moves the index to the front for the web.
+        # Hard-cut concat. Re-encode AUDIO (copy video) so joins are seamless —
+        # stream-copying AAC leaves priming gaps that click/cut at every boundary.
         ok = _run_ffmpeg([
             ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_txt.resolve()),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(concat_out),
-        ], timeout=600)
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", str(concat_out),
+        ], timeout=400)
 
     if ok and needs_music:
         # Loop the music a finite number of times to cover the full video (a plain
@@ -492,7 +466,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             f"[1:a]volume={music_vol}[m];[0:a][m]amix=inputs=2:duration=first:"
             f"dropout_transition=0:normalize=0[aout]",
             "-map", "0:v", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
             str(Path(out_path).resolve()),
         ], timeout=400)
         if mixed and Path(out_path).exists():
@@ -536,6 +510,15 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         except: pass
     try: concat_txt.unlink()
     except: pass
+    # Prune kept subtitle files to the newest 30 (diagnostics, not a junk drawer).
+    try:
+        kept_ass = sorted(Path("output/videos").glob("_sub_*.ass"),
+                          key=lambda f: f.stat().st_mtime, reverse=True)
+        for old in kept_ass[30:]:
+            try: old.unlink()
+            except Exception: pass
+    except Exception:
+        pass
 
     if ok and Path(out_path).exists():
         size = Path(out_path).stat().st_size // (1024 * 1024)

@@ -51,6 +51,13 @@ def _clean(text: str) -> str:
         if (0x200B <= o <= 0x200F or 0x202A <= o <= 0x202E
                 or 0x2060 <= o <= 0x2069 or o in (0xFEFF, 0x00AD, 0x061C)):
             continue
+        # Arabic tashkil (fatha/damma/kasra/shadda/tanween/quranic marks): stripped.
+        # Subtitles don't need vocalisation, and under libass's simple shaper the
+        # marks map to legacy presentation forms (U+FE70-FE7F) that many fonts
+        # lack → tofu boxes INSERTED between letters (e.g. "فيلَّا" → "في□لا").
+        if (0x064B <= o <= 0x065F or o == 0x0670
+                or 0x06D6 <= o <= 0x06ED or 0x0610 <= o <= 0x061A):
+            continue
         if unicodedata.category(c)[0] in ("P", "S"):
             continue
         kept.append(c)
