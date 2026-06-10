@@ -102,7 +102,8 @@ _LATIN_ONLY_FONTS = {"Impact", "Arial Black", "Bahnschrift"}
 # alef-hamza (U+FE83) — every alef rendered as a tofu box — and were removed.
 # A saved font name that is no longer in this set falls back to Noto Sans Arabic.
 _ARABIC_FONTS = {"Noto Sans Arabic", "Noto Kufi Arabic", "Noto Naskh Arabic",
-                 "IBM Plex Sans Arabic", "Amiri"}
+                 "IBM Plex Sans Arabic", "Amiri",
+                 "Droid Arabic Kufi", "Droid Arabic Naskh", "Vazirmatn"}
 
 # All bundled Arabic fonts are legacy-complete now, so this equals _ARABIC_FONTS;
 # kept as a separate set so future additions must prove themselves before being
