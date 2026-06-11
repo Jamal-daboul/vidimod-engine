@@ -194,6 +194,26 @@ def _media_duration(ff: str, path) -> float:
     return 0.0
 
 
+def _loudnorm_af(ff: str, audio_path: str) -> str:
+    """Two-pass EBU R128 loudness for one segment: measure first, then return a
+    loudnorm filter locked to the measured values (linear mode). Single-pass
+    loudnorm on short voice clips is a dynamic normalizer with a 3s lookahead —
+    on 2-6s segments it lands WELL below target (the 'quiet voiceover' bug)."""
+    import subprocess, json as _json, re as _re
+    base = "loudnorm=I=-15:TP=-1.5:LRA=11"
+    try:
+        r = subprocess.run([ff, "-hide_banner", "-i", str(audio_path),
+                            "-af", base + ":print_format=json", "-f", "null", "-"],
+                           capture_output=True, text=True, timeout=60)
+        m = _re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr, _re.S)
+        d = _json.loads(m.group(0))
+        return (f"{base}:measured_I={d['input_i']}:measured_TP={d['input_tp']}:"
+                f"measured_LRA={d['input_lra']}:measured_thresh={d['input_thresh']}:"
+                f"offset={d['target_offset']}:linear=true")
+    except Exception:
+        return base
+
+
 def _xfade_concat(ff: str, seg_paths: list, out_path, t: float = 0.3) -> bool:
     """Crossfade (dissolve) the segments together — no black gaps. Used only for
     short videos (re-encodes the whole thing, so it's gated by caller). True on ok."""
@@ -209,7 +229,10 @@ def _xfade_concat(ff: str, seg_paths: list, out_path, t: float = 0.3) -> bool:
         off = acc - t
         vout, aout = f"[v{i}]", f"[a{i}]"
         filters.append(f"{vlab}[{i}:v]xfade=transition=fade:duration={t}:offset={off:.3f}{vout}")
-        filters.append(f"{alab}[{i}:a]acrossfade=d={t}{aout}")
+        # nofade curves: segments carry a silent tail pad (see _make_seg), so the
+        # overlap mixes silence with the next voice at FULL level — a normal
+        # acrossfade was fading out the last spoken word of every segment.
+        filters.append(f"{alab}[{i}:a]acrossfade=d={t}:c1=nofade:c2=nofade{aout}")
         vlab, alab, acc = vout, aout, acc + durs[i] - t
     cmd = ([ff, "-y"] + inputs +
            ["-filter_complex", ";".join(filters), "-map", vlab, "-map", alab,
@@ -358,6 +381,11 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
         dur = _audio_duration(ff, audio_path)
 
+        # Per-segment audio chain: two-pass loudness (accurate -15 LUFS) + a 0.35s
+        # silent tail. The tail is what the 0.3s crossfade overlaps, so a transition
+        # can never eat the last spoken word again.
+        seg_af = _loudnorm_af(ff, audio_path) + ",apad=pad_dur=0.35"
+
         # Subtitles — built per segment, but NEVER on the outro shot.
         sub_filter, ass_rel = "", None
         if subs_enabled and seg.get("type") != "outro" and (seg.get("text") or "").strip():
@@ -443,10 +471,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-filter_complex", fc, "-map", "[vout]", "-map", "2:a",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                    "-r", "25",
-                   # Voice loudness varies between TTS voices/segments (some videos
-                   # came out noticeably quiet). EBU R128 loudness normalization
-                   # brings every segment to a consistent -16 LUFS.
-                   "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100",
+                   "-af", seg_af, "-ar", "44100",
                    "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
         elif img_path and Path(img_path).exists():
@@ -458,10 +483,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-vf", vf,
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                    "-r", "25",
-                   # Voice loudness varies between TTS voices/segments (some videos
-                   # came out noticeably quiet). EBU R128 loudness normalization
-                   # brings every segment to a consistent -16 LUFS.
-                   "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100",
+                   "-af", seg_af, "-ar", "44100",
                    "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
         else:
@@ -471,10 +493,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-i", str(audio_path), "-vf", vf,
                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
                    "-r", "25",
-                   # Voice loudness varies between TTS voices/segments (some videos
-                   # came out noticeably quiet). EBU R128 loudness normalization
-                   # brings every segment to a consistent -16 LUFS.
-                   "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100",
+                   "-af", seg_af, "-ar", "44100",
                    "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
 
