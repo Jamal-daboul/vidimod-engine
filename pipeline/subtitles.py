@@ -235,7 +235,8 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
                       position: str = "bottom", W: int = 1920, H: int = 1080,
                       img_path: str = None, font: str = "Arial", words=None,
                       animation: str = "pop", font_scale: float = 1.0,
-                      v_pct=None, smart: bool = False, words_per_cue: int = 3) -> str:
+                      v_pct=None, smart: bool = False, words_per_cue: int = 3,
+                      shift: float = 0.0) -> str:
     """Build a complete ASS file body for one segment spanning [0, duration].
     If `words` (list of {text,start,dur} from the TTS) is given, timing is taken
     from the real spoken word boundaries (100% sync); otherwise it's distributed
@@ -310,7 +311,7 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
     max_chars = max(6, int((W * 0.90) / (base_fs * 0.50)))
     # Short, speech-synced, animated chunks (CapCut/Submagic style).
     lines = _events_capcut(text, duration, style, words, _anim_prefix(animation),
-                           max_chars, words_per_cue, pos_tag)
+                           max_chars, words_per_cue, pos_tag, shift)
     if not lines:
         return None
     return header + "\n".join(lines) + "\n"
@@ -384,7 +385,8 @@ _NORMAL = r"{\c&HFFFFFF&\fscx100\fscy100}"
 
 
 def _events_capcut(text: str, duration: float, style: str, marks, anim: str,
-                   max_chars: int = 24, words_per_cue: int = 3, pos_tag: str = ""):
+                   max_chars: int = 24, words_per_cue: int = 3, pos_tag: str = "",
+                   shift: float = 0.0):
     """Short, animated, speech-synced caption cues (CapCut / Submagic style).
     `words_per_cue` controls how many words show at once; `max_chars` keeps each
     cue on a single line."""
@@ -438,7 +440,7 @@ def _events_capcut(text: str, duration: float, style: str, marks, anim: str,
                     # one line down (top-anchored scale grows downward). The per-word
                     # grow IS the animation.
                     body  = pos_tag + " ".join(parts)
-                    lines.append(f"Dialogue: 0,{_fmt_time(a_start)},{_fmt_time(a_end)},Default,,0,0,0,,{body}")
+                    lines.append(f"Dialogue: 0,{_fmt_time(a_start + shift)},{_fmt_time(a_end + shift)},Default,,0,0,0,,{body}")
 
             elif style == "karaoke" and len(idxs) > 1:
                 parts = []
@@ -447,7 +449,7 @@ def _events_capcut(text: str, duration: float, style: str, marks, anim: str,
                     kdur = max(0.05, nxt - ws[wi]["start"])
                     parts.append(f"{{\\k{max(1, int(round(kdur * 100)))}}}{_esc(ws[wi]['text'])}")
                 body = pos_tag + anim + " ".join(parts)
-                lines.append(f"Dialogue: 0,{_fmt_time(start)},{_fmt_time(phrase_end)},Default,,0,0,0,,{body}")
+                lines.append(f"Dialogue: 0,{_fmt_time(start + shift)},{_fmt_time(phrase_end + shift)},Default,,0,0,0,,{body}")
 
             else:
                 # Classic/word: feed RAW (cleaned) text. The cue is one continuous run,
@@ -456,7 +458,7 @@ def _events_capcut(text: str, duration: float, style: str, marks, anim: str,
                 # properly. We must NOT pre-reshape/bidi — that double-reverses it.
                 joined = " ".join(ws[wi]["text"] for wi in idxs)
                 body = pos_tag + anim + _esc(joined)
-                lines.append(f"Dialogue: 0,{_fmt_time(start)},{_fmt_time(phrase_end)},Default,,0,0,0,,{body}")
+                lines.append(f"Dialogue: 0,{_fmt_time(start + shift)},{_fmt_time(phrase_end + shift)},Default,,0,0,0,,{body}")
     return lines
 
 

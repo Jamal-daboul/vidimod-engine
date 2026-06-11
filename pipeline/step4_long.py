@@ -390,10 +390,22 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
         dur = _audio_duration(ff, audio_path)
 
-        # Per-segment audio chain: two-pass loudness (accurate -15 LUFS) + a 0.35s
-        # silent tail. The tail is what the 0.3s crossfade overlaps, so a transition
-        # can never eat the last spoken word again.
-        seg_af = _loudnorm_af(ff, audio_path) + ",apad=pad_dur=0.35"
+        # Per-segment audio chain (order matters):
+        #   loudnorm (two-pass, -14 LUFS)
+        #   → trailing cleanup: the loudness gain also amplifies the TTS's faint
+        #     breath/noise tail to ~-25 dB; trimming after the gain removes the
+        #     audible wisp that used to leak between shots (keep 50ms for decay)
+        #   → adelay 0.30s: the voice now starts exactly when the 0.3s crossfade
+        #     ENDS, so the next shot's first word can never play over the previous
+        #     shot's image (the "voice cuts in mid-shot" complaint). Subtitle cues
+        #     are shifted by the same amount (shift=0.30 below).
+        #   → apad 0.50s of true digital silence — what the crossfade overlaps.
+        AUDIO_LEAD = 0.30
+        seg_af = (_loudnorm_af(ff, audio_path) +
+                  ",areverse,silenceremove=start_periods=1:start_duration=0:"
+                  "start_threshold=-40dB:start_silence=0.05,areverse,"
+                  f"adelay={int(AUDIO_LEAD * 1000)}:all=1,apad=pad_dur=0.5")
+        vdur = dur + AUDIO_LEAD + 0.55     # video must outlast the padded audio
 
         # Subtitles — built per segment, but NEVER on the outro shot.
         sub_filter, ass_rel = "", None
@@ -403,7 +415,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                                     img_path=img_path, words=seg.get("words"),
                                     font=sub_font, animation=sub_anim,
                                     font_scale=sub_size, v_pct=sub_v, smart=sub_smart,
-                                    words_per_cue=sub_words)
+                                    words_per_cue=sub_words, shift=AUDIO_LEAD)
             if ass:
                 ass_rel = f"output/videos/_sub_{ts}_{idx:04d}.ass"
                 Path(ass_rel).write_text(ass, encoding="utf-8")
@@ -462,11 +474,11 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             # Two images per segment: switch halfway with opposite motion, so long
             # multi-sentence shots feel like video instead of a slideshow. Subtitles
             # and the outro button draw AFTER the downscale (final resolution).
-            d1 = dur / 2.0
+            d1 = vdur / 2.0
             # Pad the second half so the VIDEO is always slightly longer than the
-            # measured audio — with -shortest the output then ends exactly on the
+            # padded audio — with -shortest the output then ends exactly on the
             # audio, and a probe under-report can never clip the voiceover.
-            d2 = (dur - d1) + 0.6
+            d2 = (vdur - d1) + 0.6
             n1 = max(2, int(round(d1 * FPS)))
             n2 = max(2, int(round(d2 * FPS)))
             fc = (f"[0:v]{_kb(idx, n1)}[v0];"
@@ -484,7 +496,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-c:a", "aac", "-b:a", "192k",
                    "-shortest", str(seg_out)]
         elif img_path and Path(img_path).exists():
-            N = max(2, int(round(dur * FPS)))               # total output frames
+            N = max(2, int(round(vdur * FPS)))              # total output frames
             vf = _kb(idx, N) + "," + down + sub_filter + fade_f + btn
             cmd = [ff, "-y",
                    "-loop", "1", "-framerate", "25", "-i", str(img_path),
