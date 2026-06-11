@@ -195,23 +195,29 @@ def _media_duration(ff: str, path) -> float:
 
 
 def _loudnorm_af(ff: str, audio_path: str) -> str:
-    """Two-pass EBU R128 loudness for one segment: measure first, then return a
-    loudnorm filter locked to the measured values (linear mode). Single-pass
-    loudnorm on short voice clips is a dynamic normalizer with a 3s lookahead —
-    on 2-6s segments it lands WELL below target (the 'quiet voiceover' bug)."""
+    """Voice chain for one segment: speech compressor + two-pass EBU R128.
+    - Compressor first: TTS speech is dynamic (quiet syllables); compression
+      raises density, which is what makes voices FEEL loud on phone speakers.
+    - Then loudnorm locked to measured values (linear mode) targeting -14 LUFS —
+      YouTube's playback reference. YouTube never boosts quieter content, so
+      anything below -14 simply plays quieter than every other short.
+    Single-pass loudnorm on short clips lands well below target (3s lookahead),
+    hence the measure pass. Measurement runs THROUGH the compressor so the
+    second pass applies exact gain."""
     import subprocess, json as _json, re as _re
-    base = "loudnorm=I=-15:TP=-1.5:LRA=11"
+    comp = "acompressor=threshold=-20dB:ratio=3:attack=8:release=160"
+    base = "loudnorm=I=-14:TP=-1.0:LRA=11"
     try:
         r = subprocess.run([ff, "-hide_banner", "-i", str(audio_path),
-                            "-af", base + ":print_format=json", "-f", "null", "-"],
+                            "-af", comp + "," + base + ":print_format=json", "-f", "null", "-"],
                            capture_output=True, text=True, timeout=60)
         m = _re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr, _re.S)
         d = _json.loads(m.group(0))
-        return (f"{base}:measured_I={d['input_i']}:measured_TP={d['input_tp']}:"
+        return (f"{comp},{base}:measured_I={d['input_i']}:measured_TP={d['input_tp']}:"
                 f"measured_LRA={d['input_lra']}:measured_thresh={d['input_thresh']}:"
                 f"offset={d['target_offset']}:linear=true")
     except Exception:
-        return base
+        return comp + "," + base
 
 
 def _xfade_concat(ff: str, seg_paths: list, out_path, t: float = 0.3) -> bool:
@@ -237,7 +243,7 @@ def _xfade_concat(ff: str, seg_paths: list, out_path, t: float = 0.3) -> bool:
     cmd = ([ff, "-y"] + inputs +
            ["-filter_complex", ";".join(filters), "-map", vlab, "-map", alab,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "25", "-r", "25",
-            "-c:a", "aac", "-b:a", "160k", str(out_path)])
+            "-c:a", "aac", "-b:a", "192k", str(out_path)])
     return _run_ffmpeg(cmd, timeout=max(600, len(seg_paths) * 30))
 
 
@@ -370,13 +376,16 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         # but not jarring, and consistent across all shots.
         if not shot_gap:
             ta = (Path("output/videos") / f"_aud_{ts}_{idx:04d}.m4a").resolve()
-            af = ("silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB,"
+            # start_silence keeps 0.12s of the trimmed silence on each side — a hard
+            # trim at -45dB was clipping soft-spoken final syllables (breathy TTS
+            # endings decay below the threshold while still audible).
+            af = ("silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB:start_silence=0.12,"
                   "areverse,"
-                  "silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB,"
+                  "silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB:start_silence=0.12,"
                   "areverse,"
                   "apad=pad_dur=0.13")          # ~0.13s uniform gap between shots
             if _run_ffmpeg([ff, "-y", "-i", str(audio_path), "-af", af,
-                            "-c:a", "aac", "-b:a", "160k", str(ta)], timeout=120) and ta.exists():
+                            "-c:a", "aac", "-b:a", "192k", str(ta)], timeout=120) and ta.exists():
                 audio_path, tmp_audio = str(ta), ta
 
         dur = _audio_duration(ff, audio_path)
@@ -472,7 +481,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                    "-r", "25",
                    "-af", seg_af, "-ar", "44100",
-                   "-c:a", "aac", "-b:a", "128k",
+                   "-c:a", "aac", "-b:a", "192k",
                    "-shortest", str(seg_out)]
         elif img_path and Path(img_path).exists():
             N = max(2, int(round(dur * FPS)))               # total output frames
@@ -484,7 +493,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                    "-r", "25",
                    "-af", seg_af, "-ar", "44100",
-                   "-c:a", "aac", "-b:a", "128k",
+                   "-c:a", "aac", "-b:a", "192k",
                    "-shortest", str(seg_out)]
         else:
             vf = f"format=yuv420p{sub_filter}{fade_f}{btn}"
@@ -494,7 +503,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
                    "-r", "25",
                    "-af", seg_af, "-ar", "44100",
-                   "-c:a", "aac", "-b:a", "128k",
+                   "-c:a", "aac", "-b:a", "192k",
                    "-shortest", str(seg_out)]
 
         ok = _run_ffmpeg(cmd, timeout=300)   # 5 min max per segment
@@ -536,7 +545,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         # stream-copying AAC leaves priming gaps that click/cut at every boundary.
         ok = _run_ffmpeg([
             ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_txt.resolve()),
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", str(concat_out),
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(concat_out),
         ], timeout=400)
 
     if ok and needs_music:
@@ -554,7 +563,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             f"[1:a]volume={music_vol}[m];[0:a][m]amix=inputs=2:duration=first:"
             f"dropout_transition=0:normalize=0[aout]",
             "-map", "0:v", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
             str(Path(out_path).resolve()),
         ], timeout=400)
         if mixed and Path(out_path).exists():
