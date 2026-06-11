@@ -426,7 +426,10 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             # multi-sentence shots feel like video instead of a slideshow. Subtitles
             # and the outro button draw AFTER the downscale (final resolution).
             d1 = dur / 2.0
-            d2 = dur - d1
+            # Pad the second half so the VIDEO is always slightly longer than the
+            # measured audio — with -shortest the output then ends exactly on the
+            # audio, and a probe under-report can never clip the voiceover.
+            d2 = (dur - d1) + 0.6
             n1 = max(2, int(round(d1 * FPS)))
             n2 = max(2, int(round(d2 * FPS)))
             fc = (f"[0:v]{_kb(idx, n1)}[v0];"
