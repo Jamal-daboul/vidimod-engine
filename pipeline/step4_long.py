@@ -376,12 +376,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         # but not jarring, and consistent across all shots.
         if not shot_gap:
             ta = (Path("output/videos") / f"_aud_{ts}_{idx:04d}.m4a").resolve()
-            # start_silence keeps 0.12s of the trimmed silence on each side — a hard
-            # trim at -45dB was clipping soft-spoken final syllables (breathy TTS
-            # endings decay below the threshold while still audible).
-            af = ("silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB:start_silence=0.12,"
+            # Soft thresholds + generous keeps: fricative sentence-openers ("s", "f",
+            # "h") ramp up from below -50dB — a hard -45 trim clipped the first
+            # letter, which became audible once voice started in clean silence.
+            af = ("silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.15,"
                   "areverse,"
-                  "silenceremove=start_periods=1:start_duration=0:start_threshold=-45dB:start_silence=0.12,"
+                  "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.15,"
                   "areverse,"
                   "apad=pad_dur=0.13")          # ~0.13s uniform gap between shots
             if _run_ffmpeg([ff, "-y", "-i", str(audio_path), "-af", af,
@@ -392,20 +392,20 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
         # Per-segment audio chain (order matters):
         #   loudnorm (two-pass, -14 LUFS)
-        #   → trailing cleanup: the loudness gain also amplifies the TTS's faint
-        #     breath/noise tail to ~-25 dB; trimming after the gain removes the
-        #     audible wisp that used to leak between shots (keep 50ms for decay)
-        #   → adelay 0.30s: the voice now starts exactly when the 0.3s crossfade
-        #     ENDS, so the next shot's first word can never play over the previous
-        #     shot's image (the "voice cuts in mid-shot" complaint). Subtitle cues
-        #     are shifted by the same amount (shift=0.30 below).
-        #   → apad 0.50s of true digital silence — what the crossfade overlaps.
+        #   → gentle gate: the loudness gain also amplifies the TTS's faint
+        #     breath/noise tail to ~-25 dB. A hard trim chopped the natural decay
+        #     of the last word (audible "cut" at every shot end) — the gate instead
+        #     attenuates sub--38dB content smoothly (250ms release), so word decays
+        #     stay natural while the inter-shot wisp drops below the music bed.
+        #   → adelay 0.30s: the voice starts exactly when the 0.3s crossfade ENDS,
+        #     so the next shot's first word never plays over the previous shot's
+        #     image. Subtitle cues shift by the same amount (shift= below).
+        #   → apad 0.40s tail — what the crossfade overlaps.
         AUDIO_LEAD = 0.30
         seg_af = (_loudnorm_af(ff, audio_path) +
-                  ",areverse,silenceremove=start_periods=1:start_duration=0:"
-                  "start_threshold=-40dB:start_silence=0.05,areverse,"
-                  f"adelay={int(AUDIO_LEAD * 1000)}:all=1,apad=pad_dur=0.5")
-        vdur = dur + AUDIO_LEAD + 0.55     # video must outlast the padded audio
+                  ",agate=threshold=0.013:ratio=2:attack=10:release=250:range=0.04,"
+                  f"adelay={int(AUDIO_LEAD * 1000)}:all=1,apad=pad_dur=0.4")
+        vdur = dur + AUDIO_LEAD + 0.45     # video must outlast the padded audio
 
         # Subtitles — built per segment, but NEVER on the outro shot.
         sub_filter, ass_rel = "", None
