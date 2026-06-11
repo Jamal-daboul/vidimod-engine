@@ -568,20 +568,19 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         vdur = _media_duration(ff, concat_out)
         mdur = _media_duration(ff, music_path) or 1.0
         loops = max(1, math.ceil(vdur / mdur) + 1)
-        # Sidechain ducking: music runs ~3x the user's level but compresses itself
-        # under the voice (8:1, keyed by the voiceover), then swells back in the
-        # gaps between sentences. A constant -33dB bed sounded like the music "cut
-        # out" the moment the voice stopped; ducking keeps the gaps alive while the
-        # voice stays clearly on top.
-        duck_vol = min(music_vol * 3.0, 0.5)
+        # Constant music bed, slightly raised (~1.7x the user's setting). NO dynamic
+        # ducking: sidechaincompress on this ffmpeg terminated its output stream
+        # early (verified: 4.0s inputs -> 2.69s output), and with amix's dropout
+        # the music hard-cut mid-video — plus its gain pumping punched audible
+        # holes at every sentence onset. A steady, slightly louder bed keeps the
+        # inter-sentence gaps alive with zero moving parts.
+        bed_vol = min(music_vol * 1.7, 0.35)
         mixed = _run_ffmpeg([
             ff, "-y", "-i", str(concat_out),
             "-stream_loop", str(loops), "-i", str(Path(music_path).resolve()),
             "-filter_complex",
-            f"[0:a]asplit=2[vo][key];"
-            f"[1:a]volume={duck_vol:.3f}[m];"
-            f"[m][key]sidechaincompress=threshold=0.02:ratio=8:attack=50:release=350[duck];"
-            f"[vo][duck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]",
+            f"[1:a]volume={bed_vol:.3f}[m];"
+            f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]",
             "-map", "0:v", "-map", "[aout]",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
             str(Path(out_path).resolve()),
