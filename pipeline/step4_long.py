@@ -439,7 +439,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-i", str(audio_path),
                    "-filter_complex", fc, "-map", "[vout]", "-map", "2:a",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
-                   "-r", "25", "-c:a", "aac", "-b:a", "128k",
+                   "-r", "25",
+                   # Voice loudness varies between TTS voices/segments (some videos
+                   # came out noticeably quiet). EBU R128 loudness normalization
+                   # brings every segment to a consistent -16 LUFS.
+                   "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100",
+                   "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
         elif img_path and Path(img_path).exists():
             N = max(2, int(round(dur * FPS)))               # total output frames
@@ -449,7 +454,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-i", str(audio_path),
                    "-vf", vf,
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
-                   "-r", "25", "-c:a", "aac", "-b:a", "128k",
+                   "-r", "25",
+                   # Voice loudness varies between TTS voices/segments (some videos
+                   # came out noticeably quiet). EBU R128 loudness normalization
+                   # brings every segment to a consistent -16 LUFS.
+                   "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100",
+                   "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
         else:
             vf = f"format=yuv420p{sub_filter}{fade_f}{btn}"
@@ -457,7 +467,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-f", "lavfi", "-i", f"color=c=black:size={vid_w}x{vid_h}:rate=25",
                    "-i", str(audio_path), "-vf", vf,
                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-                   "-r", "25", "-c:a", "aac", "-b:a", "128k",
+                   "-r", "25",
+                   # Voice loudness varies between TTS voices/segments (some videos
+                   # came out noticeably quiet). EBU R128 loudness normalization
+                   # brings every segment to a consistent -16 LUFS.
+                   "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", "44100",
+                   "-c:a", "aac", "-b:a", "128k",
                    "-shortest", str(seg_out)]
 
         ok = _run_ffmpeg(cmd, timeout=300)   # 5 min max per segment
