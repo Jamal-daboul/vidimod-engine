@@ -302,6 +302,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         _seg_key(im.get("segment_type", "fact"), im.get("number", 0)): im.get("path", "")
         for im in script.get("images", []) if isinstance(im, dict)
     }
+    # Optional SECOND image per segment (long videos): the segment switches images
+    # halfway through so multi-sentence shots feel like video, not a slideshow.
+    img2_by_key = {
+        _seg_key(im.get("segment_type", "fact"), im.get("number", 0)): im.get("path", "")
+        for im in script.get("images2", []) if isinstance(im, dict)
+    }
 
     # Subtitle settings (chosen in the web review screen)
     subs_enabled = bool(script.get("enable_subtitles", True))
@@ -332,6 +338,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         if not audio_path or not Path(audio_path).exists():
             return None
         img_path  = img_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
+        img2_path = img2_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
         seg_out   = (Path("output/videos") / f"_seg_{ts}_{idx:04d}.mp4").resolve()
         tmp_audio = None
 
@@ -383,28 +390,60 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         # No per-shot fade — a fade-IN from black flashed dark at every image switch.
         # Transitions are handled at concat time (crossfade dissolve, no black).
         fade_f = ""
-        if img_path and Path(img_path).exists():
-            # Continuous Ken Burns: the motion must span the WHOLE shot. The old code
-            # incremented zoom per frame and capped at 1.14 — on any shot longer than
-            # ~6s the zoom finished early and then FROZE (looked dead / boring). Here we
-            # compute the exact output frame count and make the move reach its end state
-            # on the last frame, so the image is never still. Direction + a gentle pan
-            # vary per shot for variety.
-            uw, uh = int(vid_w * 1.25), int(vid_h * 1.25)   # headroom to crop & pan
-            FPS = 25
-            N   = max(2, int(round(dur * FPS)))             # total output frames
-            P   = f"(on/{N - 1})"                           # 0 → 1 across the whole shot
+        FPS = 25
+        # Anti-jitter: zoompan rounds its crop origin to whole input pixels each
+        # frame, and on a near-output-size canvas that 1px stepping is visible as
+        # vibration. Rendering the move on a 2× supersampled canvas and then
+        # downscaling (lanczos) makes the steps sub-pixel → smooth motion.
+        SS = 2
+        ow, oh = vid_w * SS, vid_h * SS
+        uw, uh = int(ow * 1.25), int(oh * 1.25)             # headroom to crop & pan
+
+        def _kb(m, n_frames):
+            """One continuous Ken Burns chain (scale→crop→zoompan) on the SS canvas.
+            The move spans exactly n_frames so the image is never still; direction
+            varies with m for variety."""
+            P = f"(on/{max(n_frames - 1, 1)})"              # 0 → 1 across the move
             cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)" # centered crop origin
-            m = idx % 4
+            m = m % 4
             if   m == 0: z, xo = f"1.02+0.13*{P}", ""                     # slow zoom IN
             elif m == 1: z, xo = f"1.15-0.13*{P}", ""                     # slow zoom OUT
             elif m == 2: z, xo = f"1.10+0.07*{P}", f"+({P}-0.5)*0.06*iw"  # zoom + pan →
             else:        z, xo = f"1.10+0.07*{P}", f"+(0.5-{P})*0.06*iw"  # zoom + pan ←
-            vf = (
-                f"scale={uw}:{uh}:force_original_aspect_ratio=increase,crop={uw}:{uh},"
-                f"zoompan=z='{z}':x='{cx}{xo}':y='{cy}':"
-                f"d=1:s={vid_w}x{vid_h}:fps={FPS}" + sub_filter + fade_f + btn
-            )
+            return (f"scale={uw}:{uh}:force_original_aspect_ratio=increase,"
+                    f"crop={uw}:{uh},"
+                    f"zoompan=z='{z}':x='{cx}{xo}':y='{cy}':"
+                    f"d=1:s={ow}x{oh}:fps={FPS}")
+
+        down = f"scale={vid_w}:{vid_h}:flags=lanczos"       # SS canvas → final res
+
+        use_two = (img2_path and Path(img2_path).exists()
+                   and img_path and Path(img_path).exists()
+                   and seg.get("type") != "outro" and dur >= 6.0)
+
+        if use_two:
+            # Two images per segment: switch halfway with opposite motion, so long
+            # multi-sentence shots feel like video instead of a slideshow. Subtitles
+            # and the outro button draw AFTER the downscale (final resolution).
+            d1 = dur / 2.0
+            d2 = dur - d1
+            n1 = max(2, int(round(d1 * FPS)))
+            n2 = max(2, int(round(d2 * FPS)))
+            fc = (f"[0:v]{_kb(idx, n1)}[v0];"
+                  f"[1:v]{_kb(idx + 1, n2)}[v1];"
+                  f"[v0][v1]concat=n=2:v=1:a=0[vc];"
+                  f"[vc]{down}{sub_filter}{fade_f}{btn}[vout]")
+            cmd = [ff, "-y",
+                   "-loop", "1", "-framerate", "25", "-t", f"{d1:.3f}", "-i", str(img_path),
+                   "-loop", "1", "-framerate", "25", "-t", f"{d2:.3f}", "-i", str(img2_path),
+                   "-i", str(audio_path),
+                   "-filter_complex", fc, "-map", "[vout]", "-map", "2:a",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
+                   "-r", "25", "-c:a", "aac", "-b:a", "128k",
+                   "-shortest", str(seg_out)]
+        elif img_path and Path(img_path).exists():
+            N = max(2, int(round(dur * FPS)))               # total output frames
+            vf = _kb(idx, N) + "," + down + sub_filter + fade_f + btn
             cmd = [ff, "-y",
                    "-loop", "1", "-framerate", "25", "-i", str(img_path),
                    "-i", str(audio_path),
