@@ -220,30 +220,28 @@ def _loudnorm_af(ff: str, audio_path: str) -> str:
         return comp + "," + base
 
 
-def _xfade_concat(ff: str, seg_paths: list, out_path, t: float = 0.3) -> bool:
-    """Crossfade (dissolve) the segments together — no black gaps. Used only for
-    short videos (re-encodes the whole thing, so it's gated by caller). True on ok."""
-    import re
-    durs = [_media_duration(ff, p) for p in seg_paths]
-    if any(d <= t + 0.1 for d in durs):
-        return False
+def _xfade_concat(ff: str, seg_paths: list, offsets: list, out_path, t: float = 0.3) -> bool:
+    """VIDEO-ONLY dissolve chain at PRESCRIBED global offsets. The voiceover lives
+    on its own single continuous track (see _assemble_web_long) — joining audio
+    per segment was the root of every boundary artifact, so video and audio are
+    now assembled independently. offsets[i] = global start time of the dissolve
+    joining segment i and i+1."""
     inputs = []
     for p in seg_paths:
         inputs += ["-i", str(p)]
-    filters, vlab, alab, acc = [], "[0:v]", "[0:a]", durs[0]
+    if len(seg_paths) == 1:
+        return _run_ffmpeg([ff, "-y"] + inputs + ["-an", "-c:v", "copy",
+                            str(out_path)], timeout=300)
+    filters, vlab = [], "[0:v]"
     for i in range(1, len(seg_paths)):
-        off = acc - t
-        vout, aout = f"[v{i}]", f"[a{i}]"
-        filters.append(f"{vlab}[{i}:v]xfade=transition=fade:duration={t}:offset={off:.3f}{vout}")
-        # nofade curves: segments carry a silent tail pad (see _make_seg), so the
-        # overlap mixes silence with the next voice at FULL level — a normal
-        # acrossfade was fading out the last spoken word of every segment.
-        filters.append(f"{alab}[{i}:a]acrossfade=d={t}:c1=nofade:c2=nofade{aout}")
-        vlab, alab, acc = vout, aout, acc + durs[i] - t
+        vout = f"[v{i}]"
+        filters.append(f"{vlab}[{i}:v]xfade=transition=fade:duration={t}:"
+                       f"offset={offsets[i - 1]:.3f}{vout}")
+        vlab = vout
     cmd = ([ff, "-y"] + inputs +
-           ["-filter_complex", ";".join(filters), "-map", vlab, "-map", alab,
+           ["-filter_complex", ";".join(filters), "-map", vlab, "-an",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "25", "-r", "25",
-            "-c:a", "aac", "-b:a", "192k", str(out_path)])
+            str(out_path)])
     return _run_ffmpeg(cmd, timeout=max(600, len(seg_paths) * 30))
 
 
@@ -361,51 +359,71 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
     Path("output/videos").mkdir(parents=True, exist_ok=True)
 
+    # ── ONE continuous audio timeline ─────────────────────────────────────────
+    # The voice used to live inside each segment file, so every video join was
+    # also an AUDIO join — and every audio join was an opportunity for an audible
+    # artifact (the "tiny cuts between segments"). Now each shot's voice becomes a
+    # clean WAV, is scheduled on a single timeline with uniform gaps, and the
+    # whole track is encoded exactly ONCE. Audio boundaries no longer exist.
+    XF   = 0.3                            # video dissolve length
+    LEAD = 0.3                            # silence before the first word (== XF)
+    GAP  = 0.55 if shot_gap else 0.40     # uniform pause between shots' voices
+    TAIL = 0.45                           # silence after the last word
+
+    voice_wavs, vlens, kept = [], [], []
+    for idx, seg in enumerate(segments):
+        src = seg.get("path", "")
+        if not src or not Path(src).exists():
+            continue
+        wav = (Path("output/videos") / f"_vo_{ts}_{idx:04d}.wav").resolve()
+        # trim lead/tail silence (soft -50dB threshold, generous keeps so fricative
+        # openers and breathy endings survive) → two-pass loudnorm to -14 LUFS →
+        # gentle gate so the gain-amplified noise floor can't whisper between shots
+        af = ("silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.15,"
+              "areverse,"
+              "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.15,"
+              "areverse,"
+              + _loudnorm_af(ff, src) +
+              ",agate=threshold=0.013:ratio=2:attack=10:release=250:range=0.04")
+        if not _run_ffmpeg([ff, "-y", "-i", str(src), "-af", af,
+                            "-ar", "44100", "-ac", "1", str(wav)], timeout=180):
+            _run_ffmpeg([ff, "-y", "-i", str(src), "-ar", "44100", "-ac", "1",
+                         str(wav)], timeout=120)
+        if not wav.exists():
+            continue
+        vlen = _media_duration(ff, wav)
+        if vlen <= 0.05:
+            continue
+        kept.append(seg); voice_wavs.append(wav); vlens.append(vlen)
+
+    if not voice_wavs:
+        log.error("Web long: no voice audio")
+        return script
+    segments = kept
+    n = len(segments)
+
+    starts, tcur = [], LEAD
+    for v in vlens:
+        starts.append(tcur)
+        tcur += v + GAP
+    total_T = starts[-1] + vlens[-1] + TAIL
+    # Video segment lengths chosen so each dissolve ENDS exactly when the next
+    # shot's voice begins (dissolve i starts at starts[i+1] - XF). The voice thus
+    # always starts 0.3s into its own segment — hence subtitle shift = XF.
+    seg_lens = []
+    for i in range(n):
+        if n == 1:                      seg_lens.append(total_T)
+        elif i == 0:                    seg_lens.append(starts[1])
+        elif i < n - 1:                 seg_lens.append(starts[i + 1] - starts[i])
+        else:                           seg_lens.append(total_T - starts[i] + XF)
+
     def _make_seg(args):
-        idx, seg = args
-        audio_path = seg.get("path", "")
-        if not audio_path or not Path(audio_path).exists():
-            return None
+        idx, seg, seg_len = args
         img_path  = img_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
         img2_path = img2_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
         seg_out   = (Path("output/videos") / f"_seg_{ts}_{idx:04d}.mp4").resolve()
-        tmp_audio = None
-
-        # Gap OFF → trim only LEADING + TRAILING silence (preserve in-clip pauses),
-        # then add a uniform SHORT pad so every shot gets the same small gap — tight
-        # but not jarring, and consistent across all shots.
-        if not shot_gap:
-            ta = (Path("output/videos") / f"_aud_{ts}_{idx:04d}.m4a").resolve()
-            # Soft thresholds + generous keeps: fricative sentence-openers ("s", "f",
-            # "h") ramp up from below -50dB — a hard -45 trim clipped the first
-            # letter, which became audible once voice started in clean silence.
-            af = ("silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.15,"
-                  "areverse,"
-                  "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.15,"
-                  "areverse,"
-                  "apad=pad_dur=0.13")          # ~0.13s uniform gap between shots
-            if _run_ffmpeg([ff, "-y", "-i", str(audio_path), "-af", af,
-                            "-c:a", "aac", "-b:a", "192k", str(ta)], timeout=120) and ta.exists():
-                audio_path, tmp_audio = str(ta), ta
-
-        dur = _audio_duration(ff, audio_path)
-
-        # Per-segment audio chain (order matters):
-        #   loudnorm (two-pass, -14 LUFS)
-        #   → gentle gate: the loudness gain also amplifies the TTS's faint
-        #     breath/noise tail to ~-25 dB. A hard trim chopped the natural decay
-        #     of the last word (audible "cut" at every shot end) — the gate instead
-        #     attenuates sub--38dB content smoothly (250ms release), so word decays
-        #     stay natural while the inter-shot wisp drops below the music bed.
-        #   → adelay 0.30s: the voice starts exactly when the 0.3s crossfade ENDS,
-        #     so the next shot's first word never plays over the previous shot's
-        #     image. Subtitle cues shift by the same amount (shift= below).
-        #   → apad 0.40s tail — what the crossfade overlaps.
-        AUDIO_LEAD = 0.30
-        seg_af = (_loudnorm_af(ff, audio_path) +
-                  ",agate=threshold=0.013:ratio=2:attack=10:release=250:range=0.04,"
-                  f"adelay={int(AUDIO_LEAD * 1000)}:all=1,apad=pad_dur=0.4")
-        vdur = dur + AUDIO_LEAD + 0.45     # video must outlast the padded audio
+        dur  = vlens[idx]                 # speech length (subtitle pacing)
+        vdur = seg_len                    # video length (scheduled)
 
         # Subtitles — built per segment, but NEVER on the outro shot.
         sub_filter, ass_rel = "", None
@@ -415,7 +433,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                                     img_path=img_path, words=seg.get("words"),
                                     font=sub_font, animation=sub_anim,
                                     font_scale=sub_size, v_pct=sub_v, smart=sub_smart,
-                                    words_per_cue=sub_words, shift=AUDIO_LEAD)
+                                    words_per_cue=sub_words, shift=XF)
             if ass:
                 ass_rel = f"output/videos/_sub_{ts}_{idx:04d}.ass"
                 Path(ass_rel).write_text(ass, encoding="utf-8")
@@ -475,10 +493,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             # multi-sentence shots feel like video instead of a slideshow. Subtitles
             # and the outro button draw AFTER the downscale (final resolution).
             d1 = vdur / 2.0
-            # Pad the second half so the VIDEO is always slightly longer than the
-            # padded audio — with -shortest the output then ends exactly on the
-            # audio, and a probe under-report can never clip the voiceover.
-            d2 = (vdur - d1) + 0.6
+            d2 = vdur - d1
             n1 = max(2, int(round(d1 * FPS)))
             n2 = max(2, int(round(d2 * FPS)))
             fc = (f"[0:v]{_kb(idx, n1)}[v0];"
@@ -488,113 +503,99 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             cmd = [ff, "-y",
                    "-loop", "1", "-framerate", "25", "-t", f"{d1:.3f}", "-i", str(img_path),
                    "-loop", "1", "-framerate", "25", "-t", f"{d2:.3f}", "-i", str(img2_path),
-                   "-i", str(audio_path),
-                   "-filter_complex", fc, "-map", "[vout]", "-map", "2:a",
+                   "-filter_complex", fc, "-map", "[vout]", "-an",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
-                   "-r", "25",
-                   "-af", seg_af, "-ar", "44100",
-                   "-c:a", "aac", "-b:a", "192k",
-                   "-shortest", str(seg_out)]
+                   "-r", "25", str(seg_out)]
         elif img_path and Path(img_path).exists():
             N = max(2, int(round(vdur * FPS)))              # total output frames
             vf = _kb(idx, N) + "," + down + sub_filter + fade_f + btn
             cmd = [ff, "-y",
-                   "-loop", "1", "-framerate", "25", "-i", str(img_path),
-                   "-i", str(audio_path),
-                   "-vf", vf,
+                   "-loop", "1", "-framerate", "25", "-t", f"{vdur:.3f}", "-i", str(img_path),
+                   "-vf", vf, "-an",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
-                   "-r", "25",
-                   "-af", seg_af, "-ar", "44100",
-                   "-c:a", "aac", "-b:a", "192k",
-                   "-shortest", str(seg_out)]
+                   "-r", "25", str(seg_out)]
         else:
             vf = f"format=yuv420p{sub_filter}{fade_f}{btn}"
             cmd = [ff, "-y",
-                   "-f", "lavfi", "-i", f"color=c=black:size={vid_w}x{vid_h}:rate=25",
-                   "-i", str(audio_path), "-vf", vf,
+                   "-f", "lavfi", "-i", f"color=c=black:size={vid_w}x{vid_h}:rate=25:d={vdur:.3f}",
+                   "-vf", vf, "-an",
                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-                   "-r", "25",
-                   "-af", seg_af, "-ar", "44100",
-                   "-c:a", "aac", "-b:a", "192k",
-                   "-shortest", str(seg_out)]
+                   "-r", "25", str(seg_out)]
 
         ok = _run_ffmpeg(cmd, timeout=300)   # 5 min max per segment
         # Keep the .ass files (pruned below) — they're the only ground truth for
         # diagnosing subtitle rendering issues via /api/debug/last-ass.
-        if tmp_audio:
-            try: tmp_audio.unlink()
-            except Exception: pass
         return str(seg_out) if ok and seg_out.exists() else None
 
     # Build segments in parallel (8 workers)
     with _cf.ThreadPoolExecutor(max_workers=8) as pool:
-        seg_paths = list(pool.map(_make_seg, enumerate(segments)))
+        seg_paths = list(pool.map(_make_seg,
+                                  [(i, s, seg_lens[i]) for i, s in enumerate(segments)]))
 
-    seg_paths = [p for p in seg_paths if p]
-    if not seg_paths:
-        log.error("Web long: no segments produced")
+    if any(p is None for p in seg_paths):
+        # The audio timeline is already scheduled — a missing video segment would
+        # desync everything after it, so a failed build is fatal for this render.
+        log.error("Web long: a video segment failed to build")
         return script
 
-    # Write concat list with ABSOLUTE paths so ffmpeg never doubles the directory
+    # ── Join the VIDEO-ONLY segments ───────────────────────────────────────────
+    # Dissolves at the scheduled offsets (each ends exactly when the next voice
+    # begins); hard-cut concat as fallback. Audio is attached afterwards.
     concat_txt = Path("output/videos") / f"_concat_{ts}.txt"
-    abs_lines = "\n".join(
-        f"file '{Path(p).resolve().as_posix()}'" for p in seg_paths
-    )
-    concat_txt.write_text(abs_lines, encoding="utf-8")
-
-    # Join segments. With transitions on → CROSSFADE (dissolve, no black gaps);
-    # otherwise (or if crossfade fails) → instant stream-copy concat (hard cuts).
-    # If music is selected, join to a temp first, then mix music under the voice.
-    needs_music = bool(music_path) and Path(music_path).exists()
-    concat_out  = ((Path("output/videos") / f"_cc_{ts}.mp4").resolve()
-                   if needs_music else Path(out_path).resolve())
+    concat_txt.write_text("\n".join(
+        f"file '{Path(p).resolve().as_posix()}'" for p in seg_paths), encoding="utf-8")
+    vcat = (Path("output/videos") / f"_vcat_{ts}.mp4").resolve()
 
     ok = False
-    if transitions and 2 <= len(seg_paths) <= 16:
-        ok = _xfade_concat(ff, seg_paths, concat_out, t=0.3)     # dissolve (short videos)
+    if transitions and 1 <= len(seg_paths) <= 16:
+        offsets = [starts[i] - XF for i in range(1, n)]
+        ok = _xfade_concat(ff, seg_paths, offsets, vcat, t=XF)
     if not ok:
-        # Hard-cut concat. Re-encode AUDIO (copy video) so joins are seamless —
-        # stream-copying AAC leaves priming gaps that click/cut at every boundary.
         ok = _run_ffmpeg([
             ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_txt.resolve()),
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(concat_out),
+            "-an", "-c:v", "copy", str(vcat),
         ], timeout=400)
 
-    if ok and needs_music:
-        # Loop the music a finite number of times to cover the full video (a plain
-        # `-stream_loop -1` was stopping after one play). normalize=0 keeps the voice
-        # at full volume with the music sitting under it.
-        import math
-        vdur = _media_duration(ff, concat_out)
-        mdur = _media_duration(ff, music_path) or 1.0
-        loops = max(1, math.ceil(vdur / mdur) + 1)
-        # Constant music bed, slightly raised (~1.7x the user's setting). NO dynamic
-        # ducking: sidechaincompress on this ffmpeg terminated its output stream
-        # early (verified: 4.0s inputs -> 2.69s output), and with amix's dropout
-        # the music hard-cut mid-video — plus its gain pumping punched audible
-        # holes at every sentence onset. A steady, slightly louder bed keeps the
-        # inter-sentence gaps alive with zero moving parts.
-        bed_vol = min(music_vol * 1.7, 0.35)
-        mixed = _run_ffmpeg([
-            ff, "-y", "-i", str(concat_out),
-            "-stream_loop", str(loops), "-i", str(Path(music_path).resolve()),
-            "-filter_complex",
-            f"[1:a]volume={bed_vol:.3f}[m];"
-            f"[0:a][m]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]",
-            "-map", "0:v", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            str(Path(out_path).resolve()),
-        ], timeout=400)
-        if mixed and Path(out_path).exists():
-            try: concat_out.unlink()
-            except Exception: pass
+    # ── Attach the single continuous audio track (+ optional music bed) ────────
+    # Voices are placed at their scheduled start times on one timeline and the
+    # whole track is encoded once — no per-boundary audio joins exist anymore.
+    if ok:
+        ins = [ff, "-y", "-i", str(vcat)]
+        for wpath in voice_wavs:
+            ins += ["-i", str(wpath)]
+        fc = []
+        for k in range(n):
+            fc.append(f"[{k + 1}:a]adelay={int(round(starts[k] * 1000))}:all=1[a{k}]")
+        if n == 1:
+            fc.append(f"[a0]apad=pad_dur={TAIL}[vox]")
         else:
-            log.warning("Music mix failed — keeping video without music")
-            try:
-                if Path(out_path).exists(): Path(out_path).unlink()
-                concat_out.rename(Path(out_path).resolve())
-            except Exception: pass
-        log.info(f"Background music mixed at volume {music_vol}: {Path(music_path).name}")
+            join = "".join(f"[a{k}]" for k in range(n))
+            fc.append(f"{join}amix=inputs={n}:duration=longest:normalize=0,"
+                      f"apad=pad_dur={TAIL}[vox]")
+        amap = "[vox]"
+        needs_music = bool(music_path) and Path(music_path).exists()
+        if needs_music:
+            import math
+            mdur = _media_duration(ff, music_path) or 1.0
+            loops = max(1, math.ceil(total_T / mdur) + 1)
+            # Steady bed at ~1.7x the user's level (no dynamic ducking — this
+            # ffmpeg's sidechaincompress truncates its output stream).
+            bed_vol = min(music_vol * 1.7, 0.35)
+            ins += ["-stream_loop", str(loops), "-i", str(Path(music_path).resolve())]
+            fc.append(f"[{n + 1}:a]volume={bed_vol:.3f}[bgm]")
+            fc.append(f"[vox][bgm]amix=inputs=2:duration=first:"
+                      f"dropout_transition=3:normalize=0[aout]")
+            amap = "[aout]"
+        ok = _run_ffmpeg(ins + [
+            "-filter_complex", ";".join(fc),
+            "-map", "0:v", "-map", amap,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", str(Path(out_path).resolve()),
+        ], timeout=600)
+        if needs_music:
+            log.info(f"Background music bed at volume {music_vol}: {Path(music_path).name}")
+        try: vcat.unlink()
+        except Exception: pass
 
     # ── Optional retro/analog effect over the WHOLE video (final encode pass) ──
     # Applied once on the finished file so moving grain/scanlines are continuous and
@@ -624,6 +625,9 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
     for p in seg_paths:
         try: Path(p).unlink()
         except: pass
+    for wpath in voice_wavs:
+        try: Path(wpath).unlink()
+        except Exception: pass
     try: concat_txt.unlink()
     except: pass
     # Prune kept subtitle files to the newest 30 (diagnostics, not a junk drawer).
