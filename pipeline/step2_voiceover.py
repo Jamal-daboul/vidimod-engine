@@ -251,12 +251,17 @@ def _run_jobs_silma(jobs: list, script: dict) -> list:
     import requests
     base = os.getenv("SILMA_TTS_URL", "").rstrip("/")
     edge_voice = _pick_voice(script)
+    # The picked SILMA voice id (e.g. "Karim"); "" / "auto" → server's default voice.
+    silma_voice = (script.get("voice") or "").strip()
+    if silma_voice.lower() == "auto":
+        silma_voice = ""
     results = []
     for job in jobs:
         ok = False
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                r = requests.post(f"{base}/tts", json={"text": job["text"]}, timeout=180)
+                r = requests.post(f"{base}/tts",
+                                  json={"text": job["text"], "voice": silma_voice}, timeout=180)
                 if r.status_code == 200 and r.content and len(r.content) > 1000:
                     Path(job["path"]).write_bytes(r.content)
                     ok = True
