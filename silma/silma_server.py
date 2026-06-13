@@ -10,6 +10,15 @@ import threading
 
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
+
+# Use all CPU cores — SILMA is a diffusion model and CPU-bound; the default thread
+# count can leave cores idle and make synthesis needlessly slow.
+try:
+    import torch
+    torch.set_num_threads(max(1, os.cpu_count() or 4))
+except Exception:
+    pass
+
 from silma_tts.api import SilmaTTS
 
 VOICES_DIR   = os.getenv("SILMA_VOICES_DIR", "voices")

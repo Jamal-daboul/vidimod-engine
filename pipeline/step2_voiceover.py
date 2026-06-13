@@ -261,7 +261,7 @@ def _run_jobs_silma(jobs: list, script: dict) -> list:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 r = requests.post(f"{base}/tts",
-                                  json={"text": job["text"], "voice": silma_voice}, timeout=180)
+                                  json={"text": job["text"], "voice": silma_voice}, timeout=300)
                 if r.status_code == 200 and r.content and len(r.content) > 1000:
                     Path(job["path"]).write_bytes(r.content)
                     ok = True
