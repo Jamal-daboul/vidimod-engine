@@ -14,6 +14,7 @@ Robustness notes:
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,31 @@ def _pick_voice(script: dict) -> str:
     sex  = (script.get("voice_sex") or "female").lower()
     pair = LANG_VOICES.get(lang, LANG_VOICES["English"])
     return pair.get(sex, pair["female"])
+
+
+# ── Google Cloud TTS (Chirp3-HD) — premium Arabic/Turkish/multilingual narration ──
+# Used for non-English when GOOGLE_TTS_API_KEY is set; far more natural than free
+# edge-tts. Chirp3-HD voice "personalities" (Kore, Charon …) are shared across all
+# locales, so we keep one female + one male and just swap the locale prefix.
+LANG_LOCALES = {
+    "Arabic": "ar-XA", "English": "en-US", "Turkish": "tr-TR", "Spanish": "es-ES",
+    "French": "fr-FR", "German": "de-DE", "Hindi": "hi-IN", "Italian": "it-IT",
+    "Portuguese": "pt-BR", "Russian": "ru-RU", "Japanese": "ja-JP", "Korean": "ko-KR",
+    "Dutch": "nl-NL", "Polish": "pl-PL", "Indonesian": "id-ID",
+}
+GOOGLE_CHIRP_VOICE = {"male": "Charon", "female": "Kore"}   # both multilingual Chirp3-HD
+GOOGLE_RATE = 1.15                                          # match edge's +15% pace
+
+
+def _google_voice(script: dict):
+    """Chirp3-HD voice name like 'ar-XA-Chirp3-HD-Kore', or None if the language has
+    no mapped locale (→ caller falls back to edge-tts)."""
+    loc = LANG_LOCALES.get(script.get("language", "English"))
+    if not loc:
+        return None
+    sex  = (script.get("voice_sex") or "female").lower()
+    name = GOOGLE_CHIRP_VOICE.get(sex, GOOGLE_CHIRP_VOICE["female"])
+    return f"{loc}-Chirp3-HD-{name}"
 
 
 def _attempt_timeout(text: str) -> float:
@@ -182,6 +208,14 @@ def _resolve_engine(script: dict):
         else:
             log.warning("Kokoro not installed/available; using edge-tts for English")
 
+    # Non-English (or English with Kokoro down): use Google Chirp3-HD when an API
+    # key is configured — much more natural for Arabic/Turkish than free edge-tts.
+    if forced != "edge":
+        gvoice = _google_voice(script)
+        if gvoice and os.getenv("GOOGLE_TTS_API_KEY"):
+            log.info(f"TTS engine=google voice={gvoice}")
+            return "google", gvoice, ".mp3"
+
     voice = _pick_voice(script)
     log.info(f"TTS engine=edge voice={voice}")
     return "edge", voice, ".mp3"
@@ -205,6 +239,49 @@ def _run_jobs_kokoro(jobs: list, voice: str) -> list:
         if words is None:
             log.error(f"Kokoro failed entirely for '{job['text'][:30]}…'")
         results.append((job, words))
+    return results
+
+
+def _run_jobs_google(jobs: list, voice: str, script: dict) -> list:
+    """Synthesize all jobs with Google Cloud TTS (Chirp3-HD). Returns [(job, words)]
+    like the other engines. words is [] — Chirp3-HD returns no per-word timestamps,
+    so subtitles spread each segment's text proportionally across its duration
+    (subtitles.py already does this when words is empty). Any segment Google can't
+    produce falls back to edge-tts so a video never ends up with a missing segment."""
+    import base64
+    import requests
+    key        = os.getenv("GOOGLE_TTS_API_KEY", "")
+    locale     = voice.split("-Chirp3-HD-")[0]               # "ar-XA-Chirp3-HD-Kore" → "ar-XA"
+    url        = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={key}"
+    edge_voice = _pick_voice(script)                         # for per-segment fallback
+    results    = []
+    for job in jobs:
+        audio_b64 = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                r = requests.post(url, timeout=60, json={
+                    "input":       {"text": job["text"]},
+                    "voice":       {"languageCode": locale, "name": voice},
+                    "audioConfig": {"audioEncoding": "MP3", "speakingRate": GOOGLE_RATE},
+                })
+                if r.status_code != 200:
+                    log.warning(f"Google TTS HTTP {r.status_code} ({attempt}/{MAX_ATTEMPTS}): {r.text[:160]}")
+                    continue
+                audio_b64 = r.json().get("audioContent")
+                if audio_b64:
+                    break
+                log.warning(f"Google TTS returned no audio ({attempt}/{MAX_ATTEMPTS})")
+            except Exception as e:
+                log.warning(f"Google TTS attempt {attempt}/{MAX_ATTEMPTS} for '{job['text'][:30]}…': {e}")
+        if audio_b64:
+            Path(job["path"]).write_bytes(base64.b64decode(audio_b64))
+            if Path(job["path"]).exists() and Path(job["path"]).stat().st_size > 0:
+                results.append((job, []))           # empty words → proportional subtitles
+                continue
+        # Google failed for this segment → edge-tts so the audio is never missing.
+        log.warning(f"Google TTS failed for '{job['text'][:30]}…' → edge-tts fallback")
+        ok, words = speak(job["text"], job["path"], edge_voice)
+        results.append((job, words if ok else None))
     return results
 
 
@@ -245,6 +322,8 @@ def run(script: dict) -> dict:
     #   Kokoro runs synchronously (torch); edge-tts runs concurrent async.
     if engine == "kokoro":
         results = _run_jobs_kokoro(jobs, voice)
+    elif engine == "google":
+        results = _run_jobs_google(jobs, voice, script)
     else:
         results = asyncio.run(_run_jobs(jobs, voice))
     segments = []
