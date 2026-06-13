@@ -12,7 +12,15 @@ import os
 import requests
 
 KEY = os.getenv("GOOGLE_TTS_API_KEY", "").strip()
-assert KEY, "GOOGLE_TTS_API_KEY not set (export it or pass from /app/backend/.env)"
+if not KEY:                                  # fall back to the backend .env
+    try:
+        for line in open("/app/backend/.env", encoding="utf-8"):
+            if line.startswith("GOOGLE_TTS_API_KEY="):
+                KEY = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    except Exception:
+        pass
+assert KEY, "GOOGLE_TTS_API_KEY not found (env or /app/backend/.env)"
 
 OUT = os.getenv("SILMA_VOICES_DIR", "voices")
 os.makedirs(OUT, exist_ok=True)
