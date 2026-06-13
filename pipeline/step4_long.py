@@ -359,6 +359,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         for im in script.get("images2", []) if isinstance(im, dict)
     }
 
+    # Safety net: an ordered list of every real image, used when a segment's
+    # (type, number) key has no match. The web layer numbers images and audio the
+    # SAME way now, so misses should not happen — but if one ever does, showing a
+    # neighbouring image (cycled by segment index) beats a jarring black frame.
+    _avail_imgs = [p for p in img_by_key.values() if p and Path(p).exists()]
+
     # Subtitle settings (chosen in the web review screen)
     subs_enabled = bool(script.get("enable_subtitles", True))
     sub_style    = script.get("subtitle_style", "classic")
@@ -444,6 +450,10 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         idx, seg, seg_len = args
         img_path  = img_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
         img2_path = img2_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
+        # Never render a fact/hook as black: fall back to a real image if this
+        # segment's key didn't resolve (the outro is allowed to be imageless).
+        if (not img_path or not Path(img_path).exists()) and _avail_imgs and seg.get("type") != "outro":
+            img_path = _avail_imgs[idx % len(_avail_imgs)]
         seg_out   = (Path("output/videos") / f"_seg_{ts}_{idx:04d}.mp4").resolve()
         dur  = vlens[idx]                 # speech length (subtitle pacing)
         vdur = seg_len                    # video length (scheduled)
