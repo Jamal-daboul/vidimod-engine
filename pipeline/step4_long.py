@@ -194,6 +194,29 @@ def _media_duration(ff: str, path) -> float:
     return 0.0
 
 
+def _music_bed_gain_db(ff: str, music_path, target_lufs: float):
+    """Measure a music track's integrated loudness (EBU R128) and return the
+    constant dB gain that lands it at `target_lufs`. This is what makes every
+    background track sit at the SAME perceived level under the voice, no matter how
+    loud or quiet the source file was mastered. Returns None if it can't measure
+    (caller falls back to the old fixed multiplier)."""
+    import subprocess, json as _json, re as _re
+    try:
+        r = subprocess.run(
+            [ff, "-hide_banner", "-i", str(music_path),
+             "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=90)
+        m = _re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr, _re.S)
+        if not m:
+            return None
+        measured = float(_json.loads(m.group(0))["input_i"])
+        if measured <= -70:                 # silence / unmeasurable
+            return 0.0
+        return max(-30.0, min(12.0, target_lufs - measured))   # gain, sanely clamped
+    except Exception:
+        return None
+
+
 def _loudnorm_af(ff: str, audio_path: str) -> str:
     """Voice chain for one segment: speech compressor + two-pass EBU R128.
     - Compressor first: TTS speech is dynamic (quiet syllables); compression
@@ -578,11 +601,22 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             import math
             mdur = _media_duration(ff, music_path) or 1.0
             loops = max(1, math.ceil(total_T / mdur) + 1)
-            # Steady bed at ~1.7x the user's level (no dynamic ducking — this
-            # ffmpeg's sidechaincompress truncates its output stream).
-            bed_vol = min(music_vol * 1.7, 0.35)
             ins += ["-stream_loop", str(loops), "-i", str(Path(music_path).resolve())]
-            fc.append(f"[{n + 1}:a]volume={bed_vol:.3f}[bgm]")
+            # Loudness-matched bed: measure THIS track's integrated loudness and
+            # apply the exact constant gain to land it at a target LUFS that sits a
+            # fixed distance below the voice (already -14 LUFS). So a track mastered
+            # loud and a quiet one both end up at the same perceived bed level — no
+            # more "this song is way louder than that one". The slider now nudges the
+            # target loudness instead of a raw multiplier. Constant gain → no pumping,
+            # safe with stream_loop (unlike the dynamic ducking that truncated audio).
+            bed_target = -14.0 - max(8.0, min(28.0, 17.0 + (0.12 - music_vol) * 90.0))
+            gain_db = _music_bed_gain_db(ff, music_path, bed_target)
+            if gain_db is not None:
+                fc.append(f"[{n + 1}:a]volume={gain_db:.2f}dB[bgm]")
+                log.info(f"Music bed → {bed_target:.1f} LUFS (gain {gain_db:+.1f} dB): {Path(music_path).name}")
+            else:
+                bed_vol = min(music_vol * 1.7, 0.35)   # measurement failed → old behavior
+                fc.append(f"[{n + 1}:a]volume={bed_vol:.3f}[bgm]")
             fc.append(f"[vox][bgm]amix=inputs=2:duration=first:"
                       f"dropout_transition=3:normalize=0[aout]")
             amap = "[aout]"
