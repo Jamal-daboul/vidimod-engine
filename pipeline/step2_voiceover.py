@@ -56,16 +56,29 @@ LANG_LOCALES = {
     "Portuguese": "pt-BR", "Russian": "ru-RU", "Japanese": "ja-JP", "Korean": "ko-KR",
     "Dutch": "nl-NL", "Polish": "pl-PL", "Indonesian": "id-ID",
 }
-GOOGLE_CHIRP_VOICE = {"male": "Charon", "female": "Kore"}   # both multilingual Chirp3-HD
+GOOGLE_CHIRP_VOICE = {"male": "Charon", "female": "Kore"}   # gender defaults (multilingual)
 GOOGLE_RATE = 1.15                                          # match edge's +15% pace
+# All 28 Chirp3-HD voice "personalities" (shared across every locale). A guard so an
+# arbitrary voice string (e.g. a leftover Kokoro id) is never sent as a voice name.
+CHIRP3_VOICES = {
+    "Achernar", "Aoede", "Autonoe", "Callirrhoe", "Despina", "Erinome", "Gacrux",
+    "Kore", "Laomedeia", "Leda", "Pulcherrima", "Sulafat", "Vindemiatrix", "Zephyr",
+    "Achird", "Algenib", "Algieba", "Alnilam", "Charon", "Enceladus", "Fenrir",
+    "Iapetus", "Orus", "Puck", "Rasalgethi", "Sadachbia", "Sadaltager", "Schedar",
+    "Umbriel", "Zubenelgenubi",
+}
 
 
 def _google_voice(script: dict):
     """Chirp3-HD voice name like 'ar-XA-Chirp3-HD-Kore', or None if the language has
-    no mapped locale (→ caller falls back to edge-tts)."""
+    no mapped locale (→ caller falls back to edge-tts). A user-picked Chirp3-HD voice
+    (script['voice']) wins; otherwise fall back to the gender default."""
     loc = LANG_LOCALES.get(script.get("language", "English"))
     if not loc:
         return None
+    chosen = (script.get("voice") or "auto").strip()
+    if chosen in CHIRP3_VOICES:
+        return f"{loc}-Chirp3-HD-{chosen}"
     sex  = (script.get("voice_sex") or "female").lower()
     name = GOOGLE_CHIRP_VOICE.get(sex, GOOGLE_CHIRP_VOICE["female"])
     return f"{loc}-Chirp3-HD-{name}"
