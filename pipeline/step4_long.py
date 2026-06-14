@@ -401,8 +401,10 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
     voice_wavs, vlens, kept = [], [], []
     for idx, seg in enumerate(segments):
+        _sk = f"{seg.get('type')}{seg.get('number', '') or ''}"
         src = seg.get("path", "")
         if not src or not Path(src).exists():
+            log.warning(f"[keep] DROP {_sk}: audio file missing -> {src!r}")
             continue
         wav = (Path("output/videos") / f"_vo_{ts}_{idx:04d}.wav").resolve()
         # trim lead/tail silence (soft -50dB threshold, generous keeps so fricative
@@ -419,9 +421,11 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             _run_ffmpeg([ff, "-y", "-i", str(src), "-ar", "44100", "-ac", "1",
                          str(wav)], timeout=120)
         if not wav.exists():
+            log.warning(f"[keep] DROP {_sk}: ffmpeg produced no wav from {src!r}")
             continue
         vlen = _media_duration(ff, wav)
         if vlen <= 0.05:
+            log.warning(f"[keep] DROP {_sk}: silent after processing (vlen={vlen:.3f}s) <- {src!r}")
             continue
         kept.append(seg); voice_wavs.append(wav); vlens.append(vlen)
 
@@ -430,6 +434,8 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         return script
     segments = kept
     n = len(segments)
+    log.info("[keep] kept %d segments: %s", n,
+             [f"{s.get('type')}{s.get('number', '') or ''}" for s in kept])
 
     starts, tcur = [], LEAD
     for v in vlens:
