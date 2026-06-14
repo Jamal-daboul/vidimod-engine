@@ -593,7 +593,17 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
     ok = False
     if transitions and 1 <= len(seg_paths) <= 16:
-        offsets = [starts[i] - XF for i in range(1, n)]
+        # Chained xfade offsets must be CUMULATIVE on the combined stream, which
+        # shrinks by XF at every dissolve — NOT the global voice-start times. Using
+        # the global times made offset == combined-length by the 2nd join, so ffmpeg
+        # silently truncated the whole video to the first ~2 segments (the long-
+        # standing "only a few images render" bug — only on accounts with transitions
+        # ON; transitions-off accounts used the correct hard-cut concat below).
+        offsets, _L = [], seg_lens[0]
+        for i in range(1, n):
+            _o = _L - XF
+            offsets.append(_o)
+            _L = _o + seg_lens[i]
         ok = _xfade_concat(ff, seg_paths, offsets, vcat, t=XF)
     if not ok:
         ok = _run_ffmpeg([
