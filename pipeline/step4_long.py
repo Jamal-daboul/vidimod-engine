@@ -619,13 +619,17 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             # more "this song is way louder than that one". The slider now nudges the
             # target loudness instead of a raw multiplier. Constant gain → no pumping,
             # safe with stream_loop (unlike the dynamic ducking that truncated audio).
-            bed_target = -14.0 - max(8.0, min(28.0, 17.0 + (0.12 - music_vol) * 90.0))
+            # Gap below the -14 LUFS voice. Default music_vol=0.12 → 8 LU gap →
+            # music bed at -22 LUFS: clearly present under the narration (not faint),
+            # while the voice still sits on top. Slider raises/lowers it: down to a
+            # 5 LU gap (-19, music-forward) or up to 20 LU (-34, very subtle).
+            bed_target = -14.0 - max(5.0, min(20.0, 8.0 + (0.12 - music_vol) * 70.0))
             gain_db = _music_bed_gain_db(ff, music_path, bed_target)
             if gain_db is not None:
                 fc.append(f"[{n + 1}:a]volume={gain_db:.2f}dB[bgm]")
                 log.info(f"Music bed → {bed_target:.1f} LUFS (gain {gain_db:+.1f} dB): {Path(music_path).name}")
             else:
-                bed_vol = min(music_vol * 1.7, 0.35)   # measurement failed → old behavior
+                bed_vol = min(music_vol * 2.6, 0.5)   # measurement failed → louder raw fallback
                 fc.append(f"[{n + 1}:a]volume={bed_vol:.3f}[bgm]")
             fc.append(f"[vox][bgm]amix=inputs=2:duration=first:"
                       f"dropout_transition=3:normalize=0[aout]")
