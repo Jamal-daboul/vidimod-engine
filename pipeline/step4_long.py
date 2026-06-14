@@ -451,6 +451,8 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         elif i == 0:                    seg_lens.append(starts[1])
         elif i < n - 1:                 seg_lens.append(starts[i + 1] - starts[i])
         else:                           seg_lens.append(total_T - starts[i] + XF)
+    log.info("[timeline] vlens(audio s)=%s total_T=%.2f seg_lens=%s",
+             [round(v, 2) for v in vlens], round(total_T, 2), [round(x, 2) for x in seg_lens])
 
     def _make_seg(args):
         idx, seg, seg_len = args
@@ -463,6 +465,10 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         seg_out   = (Path("output/videos") / f"_seg_{ts}_{idx:04d}.mp4").resolve()
         dur  = vlens[idx]                 # speech length (subtitle pacing)
         vdur = seg_len                    # video length (scheduled)
+        log.info("[seg] %s%s img=%s dur=%.2f vdur=%.2f",
+                 seg.get("type"), seg.get("number", "") or "",
+                 (Path(img_path).name if img_path and Path(img_path).exists() else "NONE"),
+                 dur, vdur)
 
         # Subtitles — built per segment, but NEVER on the outro shot.
         sub_filter, ass_rel = "", None
