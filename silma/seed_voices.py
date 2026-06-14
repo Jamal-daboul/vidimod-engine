@@ -25,9 +25,9 @@ assert KEY, "GOOGLE_TTS_API_KEY not found (env or /app/backend/.env)"
 OUT = os.getenv("SILMA_VOICES_DIR", "voices")
 os.makedirs(OUT, exist_ok=True)
 
-# A neutral, expressive reference sentence (defines timbre/style, not the content).
-SAMPLE = ("مرحباً بكم. سنروي لكم اليوم قصة مشوّقة مليئة بالحقائق المدهشة "
-          "التي ستغيّر طريقة تفكيركم تماماً.")
+# A SHORT reference sentence — the clip MUST stay under ~8s, or SILMA clips it and
+# then slowly re-transcribes it (the cause of the timeouts). ~5s is ideal.
+SAMPLE = "مرحباً بكم، سنروي لكم اليوم قصة قصيرة ومشوقة."
 
 # name -> Chirp3-HD voice used only as the reference timbre. 4 female + 4 male.
 SEEDS = {
