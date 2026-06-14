@@ -221,14 +221,6 @@ def _resolve_engine(script: dict):
         else:
             log.warning("Kokoro not installed/available; using edge-tts for English")
 
-    # Arabic: prefer self-hosted SILMA (Arabic-native, runs on the user's laptop GPU)
-    # when SILMA_TTS_URL is set. Far more natural/relatable for Arabic than the
-    # general cloud models. Falls back to Google/edge per-segment if the laptop is
-    # unreachable (handled inside _run_jobs_silma), so videos never break.
-    if language == "Arabic" and forced != "edge" and os.getenv("SILMA_TTS_URL"):
-        log.info("TTS engine=silma")
-        return "silma", "silma", ".wav"
-
     # Non-English (or English with Kokoro down): use Google Chirp3-HD when an API
     # key is configured — much more natural for Arabic/Turkish than free edge-tts.
     if forced != "edge":
@@ -240,47 +232,6 @@ def _resolve_engine(script: dict):
     voice = _pick_voice(script)
     log.info(f"TTS engine=edge voice={voice}")
     return "edge", voice, ".mp3"
-
-
-def _run_jobs_silma(jobs: list, script: dict) -> list:
-    """Synthesize Arabic via the self-hosted SILMA server on the user's laptop
-    (SILMA_TTS_URL, e.g. a cloudflare/ngrok tunnel). Returns [(job, words)] like the
-    other engines (words=[] → subtitles distribute text proportionally). If the
-    laptop is unreachable for a segment, falls back to Google (if a key is set) then
-    edge-tts so a video is never left with a missing segment."""
-    import requests
-    base = os.getenv("SILMA_TTS_URL", "").rstrip("/")
-    edge_voice = _pick_voice(script)
-    # The picked SILMA voice id (e.g. "Karim"); "" / "auto" → server's default voice.
-    silma_voice = (script.get("voice") or "").strip()
-    if silma_voice.lower() == "auto":
-        silma_voice = ""
-    results = []
-    for job in jobs:
-        ok = False
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            try:
-                r = requests.post(f"{base}/tts",
-                                  json={"text": job["text"], "voice": silma_voice}, timeout=300)
-                if r.status_code == 200 and r.content and len(r.content) > 1000:
-                    Path(job["path"]).write_bytes(r.content)
-                    ok = True
-                    break
-                log.warning(f"SILMA HTTP {r.status_code} ({attempt}/{MAX_ATTEMPTS}) for '{job['text'][:30]}…'")
-            except Exception as e:
-                log.warning(f"SILMA attempt {attempt}/{MAX_ATTEMPTS} for '{job['text'][:30]}…': {e}")
-        if ok:
-            results.append((job, []))
-            continue
-        # Laptop unreachable → cloud fallback so audio is never missing.
-        log.warning(f"SILMA failed for '{job['text'][:30]}…' → cloud fallback")
-        gvoice = _google_voice(script) if os.getenv("GOOGLE_TTS_API_KEY") else None
-        if gvoice:
-            results.extend(_run_jobs_google([job], gvoice, script))
-        else:
-            okk, words = speak(job["text"], job["path"], edge_voice)
-            results.append((job, words if okk else None))
-    return results
 
 
 def _run_jobs_kokoro(jobs: list, voice: str) -> list:
@@ -386,8 +337,6 @@ def run(script: dict) -> dict:
         results = _run_jobs_kokoro(jobs, voice)
     elif engine == "google":
         results = _run_jobs_google(jobs, voice, script)
-    elif engine == "silma":
-        results = _run_jobs_silma(jobs, script)
     else:
         results = asyncio.run(_run_jobs(jobs, voice))
     segments = []
