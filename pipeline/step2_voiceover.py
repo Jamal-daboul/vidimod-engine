@@ -227,7 +227,7 @@ def _resolve_engine(script: dict):
         gvoice = _google_voice(script)
         if gvoice and os.getenv("GOOGLE_TTS_API_KEY"):
             log.info(f"TTS engine=google voice={gvoice}")
-            return "google", gvoice, ".mp3"
+            return "google", gvoice, ".wav"   # LINEAR16 (uncompressed) — see _run_jobs_google
 
     voice = _pick_voice(script)
     log.info(f"TTS engine=edge voice={voice}")
@@ -275,7 +275,13 @@ def _run_jobs_google(jobs: list, voice: str, script: dict) -> list:
                 r = requests.post(url, timeout=60, json={
                     "input":       {"text": job["text"]},
                     "voice":       {"languageCode": locale, "name": voice},
-                    "audioConfig": {"audioEncoding": "MP3", "speakingRate": GOOGLE_RATE},
+                    # LINEAR16 @ 24 kHz = Chirp3-HD's native, uncompressed output. The old
+                    # "MP3" export was band-limited and made the HD voice sound muffled /
+                    # "telephoney" next to edge-tts. This is the highest fidelity the model
+                    # produces; the REST API returns it already wrapped in a WAV header.
+                    "audioConfig": {"audioEncoding":   "LINEAR16",
+                                    "sampleRateHertz": 24000,
+                                    "speakingRate":    GOOGLE_RATE},
                 })
                 if r.status_code != 200:
                     log.warning(f"Google TTS HTTP {r.status_code} ({attempt}/{MAX_ATTEMPTS}): {r.text[:160]}")
@@ -292,8 +298,13 @@ def _run_jobs_google(jobs: list, voice: str, script: dict) -> list:
                 results.append((job, []))           # empty words → proportional subtitles
                 continue
         # Google failed for this segment → edge-tts so the audio is never missing.
+        # Edge writes MP3, so use a .mp3 path (the Google path is .wav) and point the
+        # segment at it; moviepy reads either container fine.
         log.warning(f"Google TTS failed for '{job['text'][:30]}…' → edge-tts fallback")
-        ok, words = speak(job["text"], job["path"], edge_voice)
+        mp3 = str(Path(job["path"]).with_suffix(".mp3"))
+        ok, words = speak(job["text"], mp3, edge_voice)
+        if ok:
+            job["path"] = mp3
         results.append((job, words if ok else None))
     return results
 
