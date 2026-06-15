@@ -382,7 +382,8 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
     transitions = bool(script.get("transitions", True))      # fade between shots
     shot_gap    = bool(script.get("shot_gap", True))          # keep natural pauses
     music_path  = script.get("music_path") or ""              # bg-music file (abs path)
-    music_vol   = float(script.get("music_volume", 0.12) or 0.12)
+    _mv         = script.get("music_volume", 0.12)
+    music_vol   = float(_mv) if _mv is not None else 0.12     # 0 = muted (don't `or` it → 0.12)
     effect       = (script.get("effect") or "none").strip().lower()           # retro/analog look
     effect_level = (script.get("effect_intensity") or "medium").strip().lower()
 
@@ -628,7 +629,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             fc.append(f"{join}amix=inputs={n}:duration=longest:normalize=0,"
                       f"apad=pad_dur={TAIL}[vox]")
         amap = "[vox]"
-        needs_music = bool(music_path) and Path(music_path).exists()
+        needs_music = music_vol > 0 and bool(music_path) and Path(music_path).exists()
         if needs_music:
             import math
             mdur = _media_duration(ff, music_path) or 1.0
@@ -794,19 +795,28 @@ def run(script: dict) -> dict:
 
         # Background music (quieter than Shorts — voice is primary)
         try:
-            from pipeline import step4b_music
-            music_path = step4b_music.run(full.duration, ts, topic=topic)
-            if music_path and Path(music_path).exists():
-                from moviepy.editor import CompositeAudioClip
-                music_clip = AudioFileClip(music_path)
-                music_clip = music_clip.subclip(0, min(music_clip.duration, full.duration))
-                music_clip = music_clip.volumex(0.07)
-                orig_audio = full.audio
-                if orig_audio is not None:
-                    full = full.set_audio(CompositeAudioClip([orig_audio, music_clip]))
-                else:
-                    full = full.set_audio(music_clip)
-                log.info(f"Music mixed at 7%: {Path(music_path).name}")
+            # Honour the music slider (0 = muted); use the chosen track when provided,
+            # else auto-pick. Long videos keep music a touch quieter (voice is primary).
+            mv = script.get("music_volume", 0.07)
+            music_volume = float(mv) if mv is not None else 0.07
+            if music_volume <= 0:
+                log.info("Background music muted (volume 0)")
+            else:
+                from pipeline import step4b_music
+                music_path = script.get("music_path") or ""
+                if not (music_path and Path(music_path).exists()):
+                    music_path = step4b_music.run(full.duration, ts, topic=topic)
+                if music_path and Path(music_path).exists():
+                    from moviepy.editor import CompositeAudioClip
+                    music_clip = AudioFileClip(music_path)
+                    music_clip = music_clip.subclip(0, min(music_clip.duration, full.duration))
+                    music_clip = music_clip.volumex(music_volume)
+                    orig_audio = full.audio
+                    if orig_audio is not None:
+                        full = full.set_audio(CompositeAudioClip([orig_audio, music_clip]))
+                    else:
+                        full = full.set_audio(music_clip)
+                    log.info(f"Music mixed at {int(round(music_volume*100))}%: {Path(music_path).name}")
         except Exception as e:
             log.warning(f"Background music skipped: {e}")
 

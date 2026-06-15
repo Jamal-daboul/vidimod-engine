@@ -375,19 +375,29 @@ def run(script: dict) -> dict:
 
         # Mix background music
         try:
-            from pipeline import step4b_music
-            music_path = step4b_music.run(full.duration, ts, topic=topic)
-            if music_path and Path(music_path).exists():
-                from moviepy.editor import CompositeAudioClip
-                music = AudioFileClip(music_path)
-                music = music.subclip(0, min(music.duration, full.duration))
-                music = music.volumex(0.12)
-                orig_audio = full.audio
-                if orig_audio is not None:
-                    full = full.set_audio(CompositeAudioClip([orig_audio, music]))
-                else:
-                    full = full.set_audio(music)
-                log.info(f"Music mixed at 12%: {Path(music_path).name}")
+            # Background music respects the UI slider (0–0.4). 0 = muted — honour it.
+            # The old code hardcoded 0.12 and IGNORED the slider entirely (and the
+            # user's chosen track). Use the chosen track when given; else auto-pick.
+            mv = script.get("music_volume", 0.12)
+            music_volume = float(mv) if mv is not None else 0.12
+            if music_volume <= 0:
+                log.info("Background music muted (volume 0)")
+            else:
+                from pipeline import step4b_music
+                music_path = script.get("music_path") or ""
+                if not (music_path and Path(music_path).exists()):
+                    music_path = step4b_music.run(full.duration, ts, topic=topic)
+                if music_path and Path(music_path).exists():
+                    from moviepy.editor import CompositeAudioClip
+                    music = AudioFileClip(music_path)
+                    music = music.subclip(0, min(music.duration, full.duration))
+                    music = music.volumex(music_volume)
+                    orig_audio = full.audio
+                    if orig_audio is not None:
+                        full = full.set_audio(CompositeAudioClip([orig_audio, music]))
+                    else:
+                        full = full.set_audio(music)
+                    log.info(f"Music mixed at {int(round(music_volume*100))}%: {Path(music_path).name}")
         except Exception as e:
             log.warning(f"Background music skipped: {e}")
 
