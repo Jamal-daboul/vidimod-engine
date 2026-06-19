@@ -624,7 +624,11 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
     vcat = (Path("output/videos") / f"_vcat_{ts}.mp4").resolve()
 
     ok = False
-    if transitions and 1 <= len(seg_paths) <= 16:
+    # Crossfades can't dissolve a motion-clip's edge cleanly — xfade grabs a stale
+    # frame from the looped Veo clip during the dissolve (looks like the clip's first
+    # frame repeated at the cut). So when any shot is animated, skip the xfade chain
+    # and hard-cut; the re-encode concat below makes a clean, seekable join.
+    if transitions and not clip_by_key and 1 <= len(seg_paths) <= 16:
         # Chained xfade offsets must be CUMULATIVE on the combined stream, which
         # shrinks by XF at every dissolve — NOT the global voice-start times. Using
         # the global times made offset == combined-length by the 2nd join, so ffmpeg
