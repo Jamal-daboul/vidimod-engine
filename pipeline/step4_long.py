@@ -358,6 +358,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         _seg_key(im.get("segment_type", "fact"), im.get("number", 0)): im.get("path", "")
         for im in script.get("images2", []) if isinstance(im, dict)
     }
+    # Veo motion clips (from the web review screen): segment → mp4. When a segment has
+    # one, it plays the clip (looped/trimmed to the voiceover length) instead of a still.
+    clip_by_key = {
+        _seg_key(c.get("segment_type", "fact"), c.get("number", 0)): c.get("path", "")
+        for c in script.get("motion_clips", []) if isinstance(c, dict)
+    }
 
     # Safety net: an ordered list of every real image, used when a segment's
     # (type, number) key has no match. The web layer numbers images and audio the
@@ -504,6 +510,26 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         # Transitions are handled at concat time (crossfade dissolve, no black).
         fade_f = ""
         FPS = 25
+
+        # ── Animated shot: loop/trim the Veo motion clip to fill vdur exactly ──────
+        # Subtitles burn on top exactly as for a still; Veo's own audio is dropped
+        # (-an) so the single continuous voiceover track stays the only audio.
+        clip_src = clip_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), "")
+        if clip_src and Path(clip_src).exists():
+            sc = (f"scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,"
+                  f"crop={vid_w}:{vid_h},setsar=1")
+            vf = f"{sc}{sub_filter}{fade_f}{btn},format=yuv420p"
+            cmd = [ff, "-y", "-stream_loop", "-1", "-i", str(clip_src), "-t", f"{vdur:.3f}",
+                   "-vf", vf, "-an",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-r", str(FPS),
+                   str(seg_out)]
+            if _run_ffmpeg(cmd, timeout=300) and seg_out.exists():
+                log.info("[seg] %s%s ANIMATED clip=%s vdur=%.2f",
+                         seg.get("type"), seg.get("number", "") or "", Path(clip_src).name, vdur)
+                return str(seg_out)
+            log.warning("[seg] %s%s clip build failed → still-image fallback",
+                        seg.get("type"), seg.get("number", "") or "")
+
         # Anti-jitter: zoompan rounds its crop origin to whole input pixels each
         # frame, and on a near-output-size canvas that 1px stepping is visible as
         # vibration. Rendering the move on a 2× supersampled canvas and then
