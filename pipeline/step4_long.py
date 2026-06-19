@@ -518,11 +518,16 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         if clip_src and Path(clip_src).exists():
             sc = (f"scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,"
                   f"crop={vid_w}:{vid_h},setsar=1")
-            vf = f"{sc}{sub_filter}{fade_f}{btn},format=yuv420p"
+            # setpts=N/(FPS*TB) rebuilds a clean monotonic CFR timeline from the frame
+            # index. Without it, -stream_loop resets the input PTS on every loop, so the
+            # segment carries non-monotonic timestamps that corrupt the concat — the
+            # player freezes at the first cut and can't seek past it. Forcing CFR + a
+            # fixed timescale also makes this segment splice-compatible with the stills.
+            vf = f"{sc},setpts=N/({FPS}*TB){sub_filter}{fade_f}{btn},format=yuv420p"
             cmd = [ff, "-y", "-stream_loop", "-1", "-i", str(clip_src), "-t", f"{vdur:.3f}",
-                   "-vf", vf, "-an",
+                   "-vf", vf, "-an", "-vsync", "cfr",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-r", str(FPS),
-                   str(seg_out)]
+                   "-video_track_timescale", "12800", str(seg_out)]
             if _run_ffmpeg(cmd, timeout=300) and seg_out.exists():
                 log.info("[seg] %s%s ANIMATED clip=%s vdur=%.2f",
                          seg.get("type"), seg.get("number", "") or "", Path(clip_src).name, vdur)
@@ -633,10 +638,21 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             _L = _o + seg_lens[i]
         ok = _xfade_concat(ff, seg_paths, offsets, vcat, t=XF)
     if not ok:
+        # Normally a fast stream-copy concat. But a motion-clip segment comes from a
+        # different encoder path (a looped Veo mp4), and stream-copy can't splice its
+        # timeline onto the still segments cleanly → the player freezes at the first
+        # cut and won't seek. When any clip is present, re-encode the join once into a
+        # single uniform stream (the final mux below is -c:v copy, so this is the pass
+        # that fixes the timeline). Clip-free renders keep the byte-identical copy path.
+        if clip_by_key:
+            vtail = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", "25",
+                     "-pix_fmt", "yuv420p", "-video_track_timescale", "12800"]
+        else:
+            vtail = ["-c:v", "copy"]
         ok = _run_ffmpeg([
             ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_txt.resolve()),
-            "-an", "-c:v", "copy", str(vcat),
-        ], timeout=400)
+            "-an", *vtail, str(vcat),
+        ], timeout=600)
 
     # ── Attach the single continuous audio track (+ optional music bed) ────────
     # Voices are placed at their scheduled start times on one timeline and the
