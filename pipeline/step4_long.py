@@ -542,16 +542,14 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             log.warning("[seg] %s%s clip build failed → still-image fallback",
                         seg.get("type"), seg.get("number", "") or "")
 
-        # Anti-jitter: zoompan rounds its crop origin to whole input pixels each
-        # frame, and on a near-output-size canvas that 1px stepping is visible as
-        # vibration. Rendering the move on a supersampled canvas and downscaling
-        # (lanczos) makes the steps sub-pixel → smooth motion.
-        # BUT supersampling at 2× means zoompan renders every frame at ~4K, which on a
-        # CPU VPS is so slow that LONG videos' ~20s segments blew past the ffmpeg
-        # timeout and failed to build. Long videos (landscape) are the wide, low-motion
-        # format, so 1× (native res) is fine there and ~4× faster; portrait shorts keep
-        # 2× (their segments are short enough to finish in time).
-        SS = 1 if vid_w >= vid_h else 2
+        # Anti-jitter: zoompan rounds its crop origin to whole input pixels each frame,
+        # and on a near-output-size canvas that 1px stepping is visible as vibration.
+        # Rendering the move on a 2× supersampled canvas and downscaling (lanczos) makes
+        # the steps sub-pixel → smooth motion. This 2× render is ~4K and CPU-heavy, so
+        # the SPEED problem it caused on long videos is solved by fewer parallel workers
+        # for landscape (see ThreadPoolExecutor below) — NOT by dropping the supersample,
+        # which brought the vibration back.
+        SS = 2
         ow, oh = vid_w * SS, vid_h * SS
         uw, uh = int(ow * 1.25), int(oh * 1.25)             # headroom to crop & pan
 
@@ -616,8 +614,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         # diagnosing subtitle rendering issues via /api/debug/last-ass.
         return str(seg_out) if ok and seg_out.exists() else None
 
-    # Build segments in parallel (8 workers)
-    with _cf.ThreadPoolExecutor(max_workers=8) as pool:
+    # Build segments in parallel. Landscape/long segments render the Ken-Burns at ~4K
+    # (2× supersampled) and run ~20s each, so 8-wide thrashed the CPU and each segment
+    # timed out. Give long videos fewer workers → each gets enough CPU to finish well
+    # within the timeout AND stay smooth. Portrait shorts keep 8 (short, fast segments).
+    _workers = 3 if vid_w >= vid_h else 8
+    with _cf.ThreadPoolExecutor(max_workers=_workers) as pool:
         seg_paths = list(pool.map(_make_seg,
                                   [(i, s, seg_lens[i]) for i, s in enumerate(segments)]))
 
