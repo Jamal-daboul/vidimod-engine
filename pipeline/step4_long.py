@@ -544,9 +544,14 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
         # Anti-jitter: zoompan rounds its crop origin to whole input pixels each
         # frame, and on a near-output-size canvas that 1px stepping is visible as
-        # vibration. Rendering the move on a 2× supersampled canvas and then
-        # downscaling (lanczos) makes the steps sub-pixel → smooth motion.
-        SS = 2
+        # vibration. Rendering the move on a supersampled canvas and downscaling
+        # (lanczos) makes the steps sub-pixel → smooth motion.
+        # BUT supersampling at 2× means zoompan renders every frame at ~4K, which on a
+        # CPU VPS is so slow that LONG videos' ~20s segments blew past the ffmpeg
+        # timeout and failed to build. Long videos (landscape) are the wide, low-motion
+        # format, so 1× (native res) is fine there and ~4× faster; portrait shorts keep
+        # 2× (their segments are short enough to finish in time).
+        SS = 1 if vid_w >= vid_h else 2
         ow, oh = vid_w * SS, vid_h * SS
         uw, uh = int(ow * 1.25), int(oh * 1.25)             # headroom to crop & pan
 
@@ -606,7 +611,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
                    "-r", "25", str(seg_out)]
 
-        ok = _run_ffmpeg(cmd, timeout=300)   # 5 min max per segment
+        ok = _run_ffmpeg(cmd, timeout=600)   # headroom for long, multi-shot renders
         # Keep the .ass files (pruned below) — they're the only ground truth for
         # diagnosing subtitle rendering issues via /api/debug/last-ass.
         return str(seg_out) if ok and seg_out.exists() else None
