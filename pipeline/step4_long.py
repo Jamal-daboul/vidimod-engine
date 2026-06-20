@@ -525,10 +525,12 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             clip_len = _media_duration(ff, str(clip_src)) or 0.0
             if clip_len > 0.1:
                 factor = max(0.1, vdur / clip_len)      # >1 slows the clip, <1 speeds it up
-                motion = f"setpts={factor:.6f}*PTS,"
+                retime = f"setpts={factor:.6f}*PTS"
             else:                                       # couldn't probe → hold last frame
-                motion = f"tpad=stop_duration={vdur:.3f}:stop_mode=clone,"
-            vf = f"{sc},{motion}{sub_filter}{fade_f}{btn},format=yuv420p"
+                retime = f"tpad=stop_duration={vdur:.3f}:stop_mode=clone"
+            # NOTE: sub_filter/btn already carry a leading comma (or are ""), so retime
+            # must NOT — otherwise we get a ",," which ffmpeg rejects (every clip failed).
+            vf = f"{sc},{retime}{sub_filter}{fade_f}{btn},format=yuv420p"
             cmd = [ff, "-y", "-i", str(clip_src),
                    "-vf", vf, "-an", "-frames:v", str(nframes), "-r", str(FPS), "-vsync", "cfr",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
