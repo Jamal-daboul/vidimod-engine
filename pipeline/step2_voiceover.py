@@ -313,9 +313,35 @@ def _run_jobs_google(jobs: list, voice: str, script: dict) -> list:
     return results
 
 
+def _use_human_audio(src: str, dest: str) -> bool:
+    """Transcode a user's RECORDED voiceover into the segment audio (24k mono wav).
+    Denoise/normalize already ran at upload; here we just make the format consistent so
+    it drops into the timeline exactly like a TTS clip. Lets a creator narrate in their
+    own human voice while AI still does everything else."""
+    import subprocess
+    try:
+        from .step4_long import _get_ffmpeg
+    except Exception:
+        from pipeline.step4_long import _get_ffmpeg
+    try:
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([_get_ffmpeg(), "-y", "-i", src, "-ar", "24000", "-ac", "1",
+                        "-c:a", "pcm_s16le", dest], capture_output=True, timeout=180)
+        return Path(dest).exists() and Path(dest).stat().st_size > 0
+    except Exception as e:
+        log.warning(f"human voice transcode failed: {e}")
+        return False
+
+
 def run(script: dict) -> dict:
     log.info("=== STEP 2: Voiceover ===")
     Path("output/audio").mkdir(parents=True, exist_ok=True)
+
+    # Shots the creator recorded themselves → {seg_key: local audio path}. Those segments
+    # use the human voice; the rest fall through to AI TTS (the feature is per-shot/optional).
+    human = script.get("human_voices") or {}
+    def _jkey(j):
+        return j["type"] if j["type"] in ("hook", "outro") else f"fact_{j.get('number')}"
 
     engine, voice, ext = _resolve_engine(script)
     script["tts_engine"] = engine
@@ -346,20 +372,40 @@ def run(script: dict) -> dict:
 
     jobs = [j for j in jobs if (j.get("text") or "").strip()]   # skip empty segments
 
-    # ── Synthesize ──
+    # Segments the creator recorded skip TTS entirely; only the rest go to the AI engine.
+    human_ids = {id(j) for j in jobs if human.get(_jkey(j)) and Path(human[_jkey(j)]).exists()}
+    tts_jobs  = [j for j in jobs if id(j) not in human_ids]
+
+    # ── Synthesize the AI segments ──
     #   Kokoro runs synchronously (torch); edge-tts runs concurrent async.
-    if engine == "kokoro":
-        results = _run_jobs_kokoro(jobs, voice)
+    if not tts_jobs:
+        results = []
+    elif engine == "kokoro":
+        results = _run_jobs_kokoro(tts_jobs, voice)
     elif engine == "google":
-        results = _run_jobs_google(jobs, voice, script)
+        results = _run_jobs_google(tts_jobs, voice, script)
     else:
-        results = asyncio.run(_run_jobs(jobs, voice))
+        results = asyncio.run(_run_jobs(tts_jobs, voice))
+    done = {id(job): words for job, words in results}
+
+    # Reassemble in the original segment order (human + AI), so the timeline lines up.
     segments = []
-    for job, words in results:
-        if words is None:
-            log.error(f"Dropping segment (TTS failed): {job.get('type')} {job.get('number', '')}")
+    for j in jobs:
+        if id(j) in human_ids:
+            dest = str(Path(j["path"]).with_suffix(".wav"))
+            if _use_human_audio(human[_jkey(j)], dest):
+                seg = {k: v for k, v in j.items()}
+                seg["path"], seg["words"], seg["human"] = dest, [], True   # no word timings → subtitles split proportionally
+                segments.append(seg)
+                log.info(f"Voiceover: HUMAN recording for {_jkey(j)}")
+            else:
+                log.error(f"Human voice failed for {_jkey(j)} — dropping segment")
             continue
-        seg = {k: v for k, v in job.items()}     # type/number/title/text/path
+        words = done.get(id(j))
+        if words is None:
+            log.error(f"Dropping segment (TTS failed): {j.get('type')} {j.get('number', '')}")
+            continue
+        seg = {k: v for k, v in j.items()}     # type/number/title/text/path
         seg["words"] = words
         segments.append(seg)
 
