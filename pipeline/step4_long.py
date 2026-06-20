@@ -518,16 +518,26 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         if clip_src and Path(clip_src).exists():
             sc = (f"scale={vid_w}:{vid_h}:force_original_aspect_ratio=increase,"
                   f"crop={vid_w}:{vid_h},setsar=1")
-            # setpts=N/(FPS*TB) rebuilds a clean monotonic CFR timeline from the frame
-            # index. Without it, -stream_loop resets the input PTS on every loop, so the
-            # segment carries non-monotonic timestamps that corrupt the concat — the
-            # player freezes at the first cut and can't seek past it. Forcing CFR + a
-            # fixed timescale also makes this segment splice-compatible with the stills.
-            vf = f"{sc},setpts=N/({FPS}*TB){sub_filter}{fade_f}{btn},format=yuv420p"
-            cmd = [ff, "-y", "-stream_loop", "-1", "-i", str(clip_src), "-t", f"{vdur:.3f}",
-                   "-vf", vf, "-an", "-vsync", "cfr",
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-r", str(FPS),
-                   "-video_track_timescale", "12800", str(seg_out)]
+            # Fill vdur WITHOUT a visible loop restart. The old -stream_loop could land
+            # the last frame on the clip's first frame, flashing it at the cut. Instead:
+            # long enough → trim; shorter → play once, then hold the last frame (tpad).
+            # -frames:v gives an EXACT frame count so the splice has no duplicate frame,
+            # and setpts=N/(FPS*TB) + CFR + a fixed timescale keep it splice-compatible
+            # with the still segments (no freeze / unseekable timeline).
+            nframes  = max(2, int(round(vdur * FPS)))
+            clip_len = _media_duration(ff, str(clip_src)) or 0.0
+            if not clip_len:                            # couldn't probe → loop to be safe
+                in_opts, motion = ["-stream_loop", "-1", "-i", str(clip_src)], ""
+            elif clip_len < vdur - 0.04:                # shorter → hold last frame
+                in_opts = ["-i", str(clip_src)]
+                motion  = f"tpad=stop_duration={vdur - clip_len:.3f}:stop_mode=clone,"
+            else:                                       # long enough → just trim
+                in_opts, motion = ["-i", str(clip_src)], ""
+            vf = f"{sc},{motion}setpts=N/({FPS}*TB){sub_filter}{fade_f}{btn},format=yuv420p"
+            cmd = ([ff, "-y"] + in_opts +
+                   ["-vf", vf, "-an", "-frames:v", str(nframes), "-vsync", "cfr",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-r", str(FPS),
+                    "-video_track_timescale", "12800", str(seg_out)])
             if _run_ffmpeg(cmd, timeout=300) and seg_out.exists():
                 log.info("[seg] %s%s ANIMATED clip=%s vdur=%.2f",
                          seg.get("type"), seg.get("number", "") or "", Path(clip_src).name, vdur)
