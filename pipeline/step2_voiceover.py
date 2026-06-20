@@ -202,7 +202,11 @@ def _resolve_engine(script: dict):
     """
     language = script.get("language", "English")
     forced   = (script.get("tts_engine") or "auto").lower()
-    want_kokoro = (language == "English" and forced != "edge")
+    # English defaults to Kokoro (natural, offline), but the user can force Google
+    # Chirp3-HD ("google") or edge ("edge"). Only take the Kokoro path when it's
+    # actually wanted — a "google" pick used to fall through here and ignore the
+    # chosen Chirp voice, producing a wrong (often male) Kokoro voice.
+    want_kokoro = (language == "English" and forced in ("auto", "kokoro"))
 
     if want_kokoro:
         kokoro = _import_kokoro()
