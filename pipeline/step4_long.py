@@ -329,6 +329,130 @@ def _effect_filter(effect: str, level: str) -> str:
     return ""
 
 
+def _prepend_thumbnail(ff, video_path, script, vid_w, vid_h, fps=25):
+    """Bake a designed thumbnail as the first ~0.5s of the video, so after upload the
+    creator can pick 'first frame' as the YouTube thumbnail. Short (9:16) vs long (16:9)
+    aware. SAFE: any error or a failed validation leaves the ORIGINAL video untouched."""
+    import subprocess, json as _json, re as _re
+    bg = assf = clip = concat_list = None
+    try:
+        title = (script.get("title") or script.get("topic") or "").strip()
+        vp = Path(video_path)
+        if not title or not vp.exists():
+            return
+        DUR = 0.5
+        portrait = vid_h > vid_w
+        d = vp.parent
+        bg          = d / f"_tbg_{vp.stem}.png"
+        assf        = d / f"_tass_{vp.stem}.ass"
+        clip        = d / f"_tclip_{vp.stem}.mp4"
+        outp        = d / f"_tout_{vp.stem}.mp4"
+        concat_list = d / f"_tcat_{vp.stem}.txt"
+        ffprobe = _re.sub(r"ffmpeg(\.exe)?$", lambda m: "ffprobe" + (m.group(1) or ""), ff)
+
+        def _probe(path):
+            try:
+                r = subprocess.run([ffprobe, "-v", "error", "-print_format", "json",
+                                    "-show_streams", "-show_format", str(path)],
+                                   capture_output=True, text=True, timeout=30)
+                return _json.loads(r.stdout or "{}")
+            except Exception:
+                return {}
+
+        meta = _probe(vp)
+        streams = meta.get("streams", [])
+        aud = next((s for s in streams if s.get("codec_type") == "audio"), {})
+        vid = next((s for s in streams if s.get("codec_type") == "video"), {})
+        arate  = str(aud.get("sample_rate") or "44100")
+        ach    = int(aud.get("channels") or 2)
+        pixfmt = vid.get("pix_fmt") or "yuv420p"
+        try:
+            dur_orig = float(meta.get("format", {}).get("duration") or 0)
+        except Exception:
+            dur_orig = 0.0
+        if dur_orig <= 0:
+            return
+
+        # 1) Background = a clean frame ~1.2s in (or 0 if very short), made punchy/contrasty.
+        ss = "1.2" if dur_orig > 2 else "0"
+        if subprocess.run([ff, "-y", "-ss", ss, "-i", str(vp), "-frames:v", "1",
+                           "-vf", "eq=contrast=1.10:saturation=1.28:brightness=-0.07",
+                           str(bg)], capture_output=True, timeout=60).returncode != 0 or not bg.exists():
+            return
+
+        # 2) Big bold centered title — Arabic-correct via the subtitle font/shaping helpers.
+        try:
+            from pipeline.subtitles import _is_rtl, _esc, _shape_visual, _renderer_has_harfbuzz
+            rtl  = _is_rtl(title)
+            body = title if (not rtl or _renderer_has_harfbuzz()) else _shape_visual(title)
+            body = _esc(body)
+        except Exception:
+            rtl  = any('؀' <= c <= 'ۿ' for c in title)
+            body = title.replace("{", "(").replace("}", ")")
+        font = "Noto Sans Arabic" if rtl else "Anton"
+        fs   = int(min(vid_w, vid_h) * (0.11 if portrait else 0.10))
+        ol   = max(4, fs // 12)
+        ml   = int(vid_w * 0.07)
+        assf.write_text(
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nWrapStyle: 0\n"
+            "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: T,%s,%d,&H00FFFFFF,&H00000000,&H64000000,1,1,%d,3,5,%d,%d,%d,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            "Dialogue: 0,0:00:00.00,0:00:%05.2f,T,,0,0,0,,%s\n"
+            % (vid_w, vid_h, font, fs, ol, ml, ml, int(vid_h * 0.08), DUR, body),
+            encoding="utf-8")
+
+        # 3) Thumbnail clip matching the video's pix_fmt/fps + silent AAC matching its audio,
+        #    so the concat below can stream-copy (fast — never re-encodes the long video).
+        fdir = "fonts" if Path("fonts").is_dir() else "."
+        vf = f"scale={vid_w}:{vid_h},subtitles={assf.as_posix()}:fontsdir={fdir},format={pixfmt},fps={fps}"
+        rc = subprocess.run([
+            ff, "-y", "-loop", "1", "-i", str(bg),
+            "-f", "lavfi", "-i", f"anullsrc=channel_layout={'stereo' if ach >= 2 else 'mono'}:sample_rate={arate}",
+            "-t", f"{DUR}", "-vf", vf,
+            "-c:v", "libx264", "-pix_fmt", pixfmt, "-preset", "veryfast", "-crf", "18",
+            "-c:a", "aac", "-ar", arate, "-ac", str(ach), "-video_track_timescale", "90000",
+            str(clip)], capture_output=True, timeout=120).returncode
+        if rc != 0 or not clip.exists():
+            return
+
+        # 4) Concat (stream copy) [thumbnail][video].
+        concat_list.write_text(f"file '{clip.as_posix()}'\nfile '{vp.as_posix()}'\n", encoding="utf-8")
+        rc = subprocess.run([ff, "-y", "-fflags", "+genpts", "-f", "concat", "-safe", "0",
+                             "-i", str(concat_list), "-c", "copy", str(outp)],
+                            capture_output=True, timeout=180).returncode
+
+        # 5) Validate before replacing — else keep the original.
+        ok = False
+        if rc == 0 and outp.exists():
+            m2 = _probe(outp)
+            try:
+                d2 = float(m2.get("format", {}).get("duration") or 0)
+            except Exception:
+                d2 = 0
+            has_v = any(s.get("codec_type") == "video" for s in m2.get("streams", []))
+            has_a = any(s.get("codec_type") == "audio" for s in m2.get("streams", []))
+            if has_v and has_a and d2 >= dur_orig + 0.2 and outp.stat().st_size > vp.stat().st_size * 0.8:
+                ok = True
+        if ok:
+            outp.replace(vp)
+            log.info("Thumbnail baked into the first frame")
+        else:
+            log.warning("Thumbnail prepend failed validation — keeping original video")
+            try: outp.unlink()
+            except Exception: pass
+    except Exception as e:
+        log.warning(f"Thumbnail step skipped: {e}")
+    finally:
+        for f in (bg, assf, clip, concat_list):
+            try:
+                if f: Path(f).unlink()
+            except Exception:
+                pass
+
+
 def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
                        vid_w: int = W, vid_h: int = H) -> dict:
     """
@@ -772,6 +896,11 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         pass
 
     if ok and Path(out_path).exists():
+        # Bake a thumbnail into the first frame (safe no-op on any failure).
+        try:
+            _prepend_thumbnail(ff, out_path, script, vid_w, vid_h, FPS)
+        except Exception as _e:
+            log.warning(f"Thumbnail step error (ignored): {_e}")
         size = Path(out_path).stat().st_size // (1024 * 1024)
         log.info(f"Web long video ready: {out_path} ({size} MB)")
         script["final_video"] = out_path
