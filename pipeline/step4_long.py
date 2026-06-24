@@ -421,7 +421,7 @@ def _prepend_thumbnail(ff, video_path, script, vid_w, vid_h, fps=25):
         # 4) Concat (stream copy) [thumbnail][video].
         concat_list.write_text(f"file '{clip.as_posix()}'\nfile '{vp.as_posix()}'\n", encoding="utf-8")
         rc = subprocess.run([ff, "-y", "-fflags", "+genpts", "-f", "concat", "-safe", "0",
-                             "-i", str(concat_list), "-c", "copy", str(outp)],
+                             "-i", str(concat_list), "-c", "copy", "-movflags", "+faststart", str(outp)],
                             capture_output=True, timeout=180).returncode
 
         # 5) Validate before replacing — else keep the original.
