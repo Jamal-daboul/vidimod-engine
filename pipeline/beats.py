@@ -134,28 +134,38 @@ def _beat_grid(env: np.ndarray, fps: float, bpm: float, duration: float) -> list
     return beats
 
 
-def analyze(path: str, cadence: str = "auto", target: float = 1.2) -> dict:
+def analyze(path: str, cadence: str = "auto", target: float = 1.2,
+            max_seconds: float = 0.0) -> dict:
     """Analyse one audio file. Returns:
-        {duration, bpm, beats:[...], cut_times:[...], image_count, slot_avg}
+        {duration, used_duration, bpm, beats:[...], cut_times:[...], image_count, slot_avg}
     `cut_times` are the chosen cut boundaries (one image per gap between them);
-    `image_count` = len(cut_times) - 1. See cut_times() for the cadence rules."""
+    `image_count` = len(cut_times) - 1. See cut_times() for the cadence rules.
+
+    `max_seconds` caps the MONTAGE length: when > 0 we build the beat grid + cut plan
+    only up to that many seconds (the user wants a 30s/60s clip, not the whole song),
+    and the render trims the song to match. `duration` is always the full song length;
+    `used_duration` is the montage length actually planned (≤ duration)."""
     ff = _ffmpeg()
     samples = _decode_mono(path, ff)
     duration = round(len(samples) / SR, 3)
+    eff = duration
+    if max_seconds and float(max_seconds) > 0:
+        eff = round(min(duration, float(max_seconds)), 3)
     env = _onset_envelope(samples)
     fps = SR / HOP
     bpm = _estimate_bpm(env, fps)
     bpm = round(max(BPM_MIN, min(BPM_MAX, bpm)), 1)
-    beats = _beat_grid(env, fps, bpm, duration)
-    cuts = cut_times(beats, duration, cadence=cadence, target=target, bpm=bpm)
+    beats = _beat_grid(env, fps, bpm, eff)
+    cuts = cut_times(beats, eff, cadence=cadence, target=target, bpm=bpm)
     slots = [round(cuts[i + 1] - cuts[i], 3) for i in range(len(cuts) - 1)]
     return {
-        "duration":    duration,
-        "bpm":         bpm,
-        "beats":       beats,
-        "cut_times":   cuts,
-        "image_count": max(1, len(cuts) - 1),
-        "slot_avg":    round(sum(slots) / len(slots), 3) if slots else 0.0,
+        "duration":      duration,
+        "used_duration": round(eff, 3),
+        "bpm":           bpm,
+        "beats":         beats,
+        "cut_times":     cuts,
+        "image_count":   max(1, len(cuts) - 1),
+        "slot_avg":      round(sum(slots) / len(slots), 3) if slots else 0.0,
     }
 
 
@@ -210,4 +220,5 @@ if __name__ == "__main__":
     p = sys.argv[1]
     cad = sys.argv[2] if len(sys.argv) > 2 else "auto"
     tgt = float(sys.argv[3]) if len(sys.argv) > 3 else 1.2
-    print(json.dumps(analyze(p, cadence=cad, target=tgt)))
+    mx  = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
+    print(json.dumps(analyze(p, cadence=cad, target=tgt, max_seconds=mx)))
