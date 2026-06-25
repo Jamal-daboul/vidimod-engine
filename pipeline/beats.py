@@ -134,35 +134,78 @@ def _beat_grid(env: np.ndarray, fps: float, bpm: float, duration: float) -> list
     return beats
 
 
-def analyze(path: str, cadence: str = "auto", target: float = 1.2,
-            max_seconds: float = 0.0) -> dict:
-    """Analyse one audio file. Returns:
-        {duration, used_duration, bpm, beats:[...], cut_times:[...], image_count, slot_avg}
-    `cut_times` are the chosen cut boundaries (one image per gap between them);
-    `image_count` = len(cut_times) - 1. See cut_times() for the cadence rules.
+def _best_start(env: np.ndarray, fps: float, duration: float,
+                window: float, beats: list) -> float:
+    """Pick the start time (snapped to a beat) whose `window`-second slice carries the
+    most onset energy — i.e. skip the slow intro and begin on the busiest, most
+    'dropped-in' part of the song. Returns a start time in seconds (0 if the window is
+    basically the whole song)."""
+    if window >= duration - 0.25 or len(env) < 4:
+        return 0.0
+    w_frames = max(1, int(round(window * fps)))
+    n = len(env)
+    cs = np.concatenate([[0.0], np.cumsum(env)])      # prefix sums → O(1) window energy
+    cands = [b for b in (beats or []) if 0.0 <= b <= duration - window + 1e-6]
+    if not cands:
+        cands = list(np.arange(0.0, max(0.0, duration - window), 0.5))
+    if not cands:
+        return 0.0
+    best_b, best_score = 0.0, -1.0
+    for b in cands:
+        i0 = int(round(b * fps)); i1 = min(n, i0 + w_frames)
+        if i1 <= i0:
+            continue
+        score = float(cs[i1] - cs[i0]) / (i1 - i0)    # mean onset energy across the window
+        if score > best_score:
+            best_score, best_b = score, b
+    return round(float(best_b), 3)
 
-    `max_seconds` caps the MONTAGE length: when > 0 we build the beat grid + cut plan
-    only up to that many seconds (the user wants a 30s/60s clip, not the whole song),
-    and the render trims the song to match. `duration` is always the full song length;
-    `used_duration` is the montage length actually planned (≤ duration)."""
+
+def analyze(path: str, cadence: str = "auto", target: float = 1.2,
+            max_seconds: float = 0.0, start: float = 0.0,
+            smart_start: bool = False) -> dict:
+    """Analyse one audio file. Returns:
+        {duration, used_duration, start, bpm, beats:[...], cut_times:[...],
+         image_count, slot_avg}
+    `cut_times`/`beats` are 0-based on the VIDEO timeline; the render plays the song
+    from `start` seconds (passed as music_start). `image_count` = len(cut_times) - 1.
+
+    `max_seconds` caps the montage length. `start` skips into the song (songs often open
+    slowly). `smart_start=True` ignores `start` and auto-picks the most energetic window
+    of length `max_seconds` (snapped to a beat) — the best place to begin."""
     ff = _ffmpeg()
     samples = _decode_mono(path, ff)
     duration = round(len(samples) / SR, 3)
-    eff = duration
-    if max_seconds and float(max_seconds) > 0:
-        eff = round(min(duration, float(max_seconds)), 3)
     env = _onset_envelope(samples)
     fps = SR / HOP
     bpm = _estimate_bpm(env, fps)
     bpm = round(max(BPM_MIN, min(BPM_MAX, bpm)), 1)
-    beats = _beat_grid(env, fps, bpm, eff)
-    cuts = cut_times(beats, eff, cadence=cadence, target=target, bpm=bpm)
+
+    want = float(max_seconds) if (max_seconds and float(max_seconds) > 0) else duration
+    want = min(want, duration)
+
+    # Full-song beat grid (absolute times, phase-aligned to onsets).
+    beats_abs = _beat_grid(env, fps, bpm, duration)
+
+    if smart_start:
+        start = _best_start(env, fps, duration, want, beats_abs)
+    start = max(0.0, min(float(start or 0.0), max(0.0, duration - 0.5)))
+    eff = round(min(want, duration - start), 3)
+
+    # Beats inside [start, start+eff], shifted to a 0-based video timeline.
+    rel = [round(b - start, 4) for b in beats_abs if (start - 1e-6) <= b <= (start + eff + 1e-6)]
+    rel = [r for r in rel if r >= 0.0]
+    if not rel or rel[0] > 0.05:
+        rel = [0.0] + [r for r in rel if r > 0.0]
+
+    cuts = cut_times(rel, eff, cadence=cadence, target=target, bpm=bpm)
     slots = [round(cuts[i + 1] - cuts[i], 3) for i in range(len(cuts) - 1)]
     return {
         "duration":      duration,
-        "used_duration": round(eff, 3),
+        "used_duration": eff,
+        "start":         round(start, 3),
         "bpm":           bpm,
-        "beats":         beats,
+        "beats":         rel,
         "cut_times":     cuts,
         "image_count":   max(1, len(cuts) - 1),
         "slot_avg":      round(sum(slots) / len(slots), 3) if slots else 0.0,
@@ -221,4 +264,6 @@ if __name__ == "__main__":
     cad = sys.argv[2] if len(sys.argv) > 2 else "auto"
     tgt = float(sys.argv[3]) if len(sys.argv) > 3 else 1.2
     mx  = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
-    print(json.dumps(analyze(p, cadence=cad, target=tgt, max_seconds=mx)))
+    st  = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
+    sm  = (sys.argv[6].lower() in ("1", "true", "yes")) if len(sys.argv) > 6 else False
+    print(json.dumps(analyze(p, cadence=cad, target=tgt, max_seconds=mx, start=st, smart_start=sm)))
