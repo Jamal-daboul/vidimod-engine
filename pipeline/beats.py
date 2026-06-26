@@ -47,9 +47,11 @@ def _ffmpeg() -> str:
 def _decode_mono(path: str, ff: str = "") -> np.ndarray:
     """Decode any audio/video file to a mono float32 array at SR (via ffmpeg stdout)."""
     ff = ff or _ffmpeg()
-    cmd = [ff, "-v", "error", "-i", str(path),
+    # -nostdin + stdin=DEVNULL: ffmpeg must NEVER read the inherited stdin, or it can hang
+    # forever (the montage analyze-beats subprocess inherits uvicorn's stdin).
+    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path),
            "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
-    out = subprocess.run(cmd, capture_output=True, timeout=180).stdout
+    out = subprocess.run(cmd, capture_output=True, timeout=180, stdin=subprocess.DEVNULL).stdout
     if not out:
         raise RuntimeError("ffmpeg produced no audio (unreadable file?)")
     # frombuffer is read-only and shares the bytes; copy so it's writable downstream.
@@ -63,9 +65,9 @@ def _decode_window(path: str, start: float, dur: float, ff: str = "") -> np.ndar
     fast input seek, so we never read the whole song just to time a short clip — this is
     the speed fix for montage analysis."""
     ff = ff or _ffmpeg()
-    cmd = [ff, "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
+    cmd = [ff, "-nostdin", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
            "-i", str(path), "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
-    out = subprocess.run(cmd, capture_output=True, timeout=120).stdout
+    out = subprocess.run(cmd, capture_output=True, timeout=45, stdin=subprocess.DEVNULL).stdout
     if not out:
         raise RuntimeError("ffmpeg produced no audio for the window (start past song end?)")
     a = np.frombuffer(out, dtype=np.float32).copy()
@@ -76,7 +78,8 @@ def _probe_duration(path: str, ff: str = "") -> float:
     """Full song length (seconds) from the container header — no decode (fast)."""
     ff = ff or _ffmpeg()
     try:
-        info = subprocess.run([ff, "-i", str(path)], capture_output=True, text=True, timeout=30).stderr
+        info = subprocess.run([ff, "-nostdin", "-i", str(path)], capture_output=True,
+                              text=True, timeout=20, stdin=subprocess.DEVNULL).stderr
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", info or "")
         if m:
             return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
