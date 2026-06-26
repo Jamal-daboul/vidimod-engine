@@ -21,6 +21,8 @@ import json
 import logging
 import re
 import subprocess
+import sys
+import time as _time
 from pathlib import Path
 
 import numpy as np
@@ -68,11 +70,12 @@ def _decode_window(path: str, start: float, dur: float, ff: str = "") -> np.ndar
     fast input seek, so we never read the whole song just to time a short clip — this is
     the speed fix for montage analysis."""
     ff = ff or _ffmpeg()
-    # Output-seek (-ss AFTER -i) + map only the audio stream: a ripped file's bogus
-    # 90000-fps cover-art "video" makes input-seek crawl/hang, so we decode the audio
-    # stream only (fast even from 0) and seek within it.
-    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0?", "-vn",
-           "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
+    # INPUT-seek (-ss BEFORE -i) so ffmpeg jumps to `start` and only reads this window's
+    # packets — a ripped file's bogus ~90000-fps cover-art video has MILLIONS of phantom
+    # packets, and reading the whole file to find the audio is what's slow. -map 0:a:0?
+    # then decodes audio only.
+    cmd = [ff, "-nostdin", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-i", str(path),
+           "-map", "0:a:0?", "-vn", "-t", f"{max(0.1, dur):.3f}",
            "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
     out = subprocess.run(cmd, capture_output=True, timeout=45, stdin=subprocess.DEVNULL).stdout
     if not out:
@@ -257,14 +260,19 @@ def analyze(path: str, cadence: str = "auto", target: float = 1.2,
     # that [start, start+want] window instead of the whole song. Beats come out 0-based on
     # the video timeline already, and the render plays the song from `start`.
     if want > 0 and not smart_start:
+        _t0 = _time.time()
         fps = SR / HOP
         samples = _decode_window(path, start, want)
+        print(f"[beats] decode window {len(samples)} samples in {_time.time()-_t0:.2f}s",
+              file=sys.stderr, flush=True)
         eff = round(len(samples) / SR, 3)            # actual window (song may be shorter)
         env = _onset_envelope(samples)
         bpm = round(max(BPM_MIN, min(BPM_MAX, _estimate_bpm(env, fps))), 1)
         beats = _beat_grid(env, fps, bpm, eff)
         cuts = cut_times(beats, eff, cadence=cadence, target=target, bpm=bpm)
         slots = [round(cuts[i + 1] - cuts[i], 3) for i in range(len(cuts) - 1)]
+        print(f"[beats] window analyze total {_time.time()-_t0:.2f}s bpm={bpm} imgs={max(1,len(cuts)-1)}",
+              file=sys.stderr, flush=True)
         return {
             "duration":      round(_probe_duration(path) or (start + eff), 3),
             "used_duration": eff,
