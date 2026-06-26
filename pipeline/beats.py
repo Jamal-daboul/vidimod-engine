@@ -19,6 +19,7 @@ then thins that grid to the cadence the user picked (auto / every beat / every N
 
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -55,6 +56,33 @@ def _decode_mono(path: str, ff: str = "") -> np.ndarray:
     a = np.frombuffer(out, dtype=np.float32).copy()
     # Guard against NaN/inf from odd encodes.
     return np.nan_to_num(a, copy=False)
+
+
+def _decode_window(path: str, start: float, dur: float, ff: str = "") -> np.ndarray:
+    """Decode ONLY [start, start+dur] of the audio to mono f32. `-ss` BEFORE `-i` is a
+    fast input seek, so we never read the whole song just to time a short clip — this is
+    the speed fix for montage analysis."""
+    ff = ff or _ffmpeg()
+    cmd = [ff, "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
+           "-i", str(path), "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
+    out = subprocess.run(cmd, capture_output=True, timeout=120).stdout
+    if not out:
+        raise RuntimeError("ffmpeg produced no audio for the window (start past song end?)")
+    a = np.frombuffer(out, dtype=np.float32).copy()
+    return np.nan_to_num(a, copy=False)
+
+
+def _probe_duration(path: str, ff: str = "") -> float:
+    """Full song length (seconds) from the container header — no decode (fast)."""
+    ff = ff or _ffmpeg()
+    try:
+        info = subprocess.run([ff, "-i", str(path)], capture_output=True, text=True, timeout=30).stderr
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", info or "")
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
 
 
 def _onset_envelope(samples: np.ndarray) -> np.ndarray:
@@ -211,6 +239,35 @@ def analyze(path: str, cadence: str = "auto", target: float = 1.2,
 
     The heavy decode/tempo work is cached per file (see _core), so repeated calls with a
     different start/length/cadence are near-instant."""
+    start = max(0.0, float(start or 0.0))
+    want  = float(max_seconds) if (max_seconds and float(max_seconds) > 0) else 0.0
+
+    # ── FAST PATH ──────────────────────────────────────────────────────────────────
+    # A fixed length from a known start (the normal montage case): decode + analyse ONLY
+    # that [start, start+want] window instead of the whole song. Beats come out 0-based on
+    # the video timeline already, and the render plays the song from `start`.
+    if want > 0 and not smart_start:
+        fps = SR / HOP
+        samples = _decode_window(path, start, want)
+        eff = round(len(samples) / SR, 3)            # actual window (song may be shorter)
+        env = _onset_envelope(samples)
+        bpm = round(max(BPM_MIN, min(BPM_MAX, _estimate_bpm(env, fps))), 1)
+        beats = _beat_grid(env, fps, bpm, eff)
+        cuts = cut_times(beats, eff, cadence=cadence, target=target, bpm=bpm)
+        slots = [round(cuts[i + 1] - cuts[i], 3) for i in range(len(cuts) - 1)]
+        return {
+            "duration":      round(_probe_duration(path) or (start + eff), 3),
+            "used_duration": eff,
+            "start":         round(start, 3),
+            "bpm":           bpm,
+            "beats":         beats,
+            "cut_times":     cuts,
+            "image_count":   max(1, len(cuts) - 1),
+            "slot_avg":      round(sum(slots) / len(slots), 3) if slots else 0.0,
+        }
+
+    # ── FULL-SONG PATH ─────────────────────────────────────────────────────────────
+    # Whole-song length, or smart_start (needs to scan everything) — cached per file.
     core = _core(path)
     duration  = core["duration"]
     fps       = core["fps"]
