@@ -49,7 +49,8 @@ def _decode_mono(path: str, ff: str = "") -> np.ndarray:
     ff = ff or _ffmpeg()
     # -nostdin + stdin=DEVNULL: ffmpeg must NEVER read the inherited stdin, or it can hang
     # forever (the montage analyze-beats subprocess inherits uvicorn's stdin).
-    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path),
+    # -vn drops any embedded cover-image / video stream (common in ripped "mp3" files).
+    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path), "-vn",
            "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
     out = subprocess.run(cmd, capture_output=True, timeout=180, stdin=subprocess.DEVNULL).stdout
     if not out:
@@ -66,7 +67,7 @@ def _decode_window(path: str, start: float, dur: float, ff: str = "") -> np.ndar
     the speed fix for montage analysis."""
     ff = ff or _ffmpeg()
     cmd = [ff, "-nostdin", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
-           "-i", str(path), "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
+           "-i", str(path), "-vn", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
     out = subprocess.run(cmd, capture_output=True, timeout=45, stdin=subprocess.DEVNULL).stdout
     if not out:
         raise RuntimeError("ffmpeg produced no audio for the window (start past song end?)")
