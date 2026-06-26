@@ -89,23 +89,25 @@ def _moving_avg(x: np.ndarray, w: int) -> np.ndarray:
 
 def _estimate_bpm(env: np.ndarray, fps: float) -> float:
     """Tempo (BPM) from the autocorrelation of the onset envelope, restricted to a
-    musical lag range so half/double-time errors are bounded."""
-    if len(env) < 4:
+    musical lag range so half/double-time errors are bounded. Uses an FFT
+    autocorrelation (O(n log n)) — the old np.correlate(full) was O(n²) and was the
+    main reason analysis felt slow on longer songs."""
+    n = len(env)
+    if n < 4:
         return 120.0
-    env = env - env.mean()
-    ac = np.correlate(env, env, mode="full")[len(env) - 1:]
+    x = (env - env.mean()).astype(np.float32)
+    nfft = 1 << int(np.ceil(np.log2(2 * n)))        # zero-pad to avoid wrap-around
+    f = np.fft.rfft(x, nfft)
+    ac = np.fft.irfft(f * np.conj(f), nfft)[:n]
     if ac[0] <= 0:
         return 120.0
     ac = ac / ac[0]
     lag_min = int(round(60.0 / BPM_MAX * fps))      # fast tempo → short lag
-    lag_max = int(round(60.0 / BPM_MIN * fps))      # slow tempo → long lag
-    lag_max = min(lag_max, len(ac) - 1)
+    lag_max = min(int(round(60.0 / BPM_MIN * fps)), n - 1)
     if lag_max <= lag_min:
         return 120.0
     best_lag = lag_min + int(np.argmax(ac[lag_min:lag_max + 1]))
-    if best_lag <= 0:
-        return 120.0
-    return float(60.0 * fps / best_lag)
+    return float(60.0 * fps / best_lag) if best_lag > 0 else 120.0
 
 
 def _beat_grid(env: np.ndarray, fps: float, bpm: float, duration: float) -> list:
@@ -161,6 +163,39 @@ def _best_start(env: np.ndarray, fps: float, duration: float,
     return round(float(best_b), 3)
 
 
+def _core(path: str) -> dict:
+    """The EXPENSIVE part — decode + onset envelope + tempo + full beat grid — depends
+    ONLY on the audio file, so cache it in a sidecar JSON keyed by size+mtime. Changing
+    the start / length / cadence then re-slices instantly without re-decoding (this is
+    what made re-analysis / smart-start feel slow). Returns
+    {duration, fps, bpm, beats_abs, env}."""
+    p = Path(path)
+    try:
+        stt = p.stat(); sig = f"{stt.st_size}-{int(stt.st_mtime)}"
+    except Exception:
+        sig = "0"
+    cache = p.with_suffix(p.suffix + ".beats.json")
+    try:
+        c = json.loads(cache.read_text(encoding="utf-8"))
+        if c.get("sig") == sig and c.get("env"):
+            return c
+    except Exception:
+        pass
+    samples = _decode_mono(path)
+    duration = round(len(samples) / SR, 3)
+    env = _onset_envelope(samples)
+    fps = SR / HOP
+    bpm = round(max(BPM_MIN, min(BPM_MAX, _estimate_bpm(env, fps))), 1)
+    beats_abs = _beat_grid(env, fps, bpm, duration)
+    c = {"sig": sig, "duration": duration, "fps": fps, "bpm": bpm,
+         "beats_abs": beats_abs, "env": [round(float(x), 5) for x in env]}
+    try:
+        cache.write_text(json.dumps(c), encoding="utf-8")
+    except Exception:
+        pass
+    return c
+
+
 def analyze(path: str, cadence: str = "auto", target: float = 1.2,
             max_seconds: float = 0.0, start: float = 0.0,
             smart_start: bool = False) -> dict:
@@ -172,20 +207,19 @@ def analyze(path: str, cadence: str = "auto", target: float = 1.2,
 
     `max_seconds` caps the montage length. `start` skips into the song (songs often open
     slowly). `smart_start=True` ignores `start` and auto-picks the most energetic window
-    of length `max_seconds` (snapped to a beat) — the best place to begin."""
-    ff = _ffmpeg()
-    samples = _decode_mono(path, ff)
-    duration = round(len(samples) / SR, 3)
-    env = _onset_envelope(samples)
-    fps = SR / HOP
-    bpm = _estimate_bpm(env, fps)
-    bpm = round(max(BPM_MIN, min(BPM_MAX, bpm)), 1)
+    of length `max_seconds` (snapped to a beat) — the best place to begin.
+
+    The heavy decode/tempo work is cached per file (see _core), so repeated calls with a
+    different start/length/cadence are near-instant."""
+    core = _core(path)
+    duration  = core["duration"]
+    fps       = core["fps"]
+    bpm       = core["bpm"]
+    beats_abs = core["beats_abs"]
+    env       = np.asarray(core["env"], dtype=np.float32)
 
     want = float(max_seconds) if (max_seconds and float(max_seconds) > 0) else duration
     want = min(want, duration)
-
-    # Full-song beat grid (absolute times, phase-aligned to onsets).
-    beats_abs = _beat_grid(env, fps, bpm, duration)
 
     if smart_start:
         start = _best_start(env, fps, duration, want, beats_abs)
