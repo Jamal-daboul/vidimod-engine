@@ -195,6 +195,15 @@ def run(script: dict) -> dict:
 
     out_path = f"output/videos/final_beat_{ts}.mp4"
 
+    # Ripped "mp3" uploads can carry a bogus 90000-fps cover-art video stream that makes
+    # every later ffmpeg op (loudness measure, mux) crawl or hang. Normalise the song to a
+    # clean audio-only WAV ONCE, then use that everywhere below.
+    _clean = (Path("output/videos") / f"_bm_song_{ts}.wav").resolve()
+    if _run_ffmpeg([ff, "-nostdin", "-y", "-i", str(Path(music_path).resolve()),
+                    "-map", "0:a:0?", "-vn", "-ac", "2", "-ar", "44100", str(_clean)],
+                   timeout=180) and _clean.exists():
+        music_path = str(_clean)
+
     # ── Audio: the song, normalised to a good level + faded out, trimmed to video ──
     gain_db = _music_bed_gain_db(ff, music_path, -14.0)
     if gain_db is None:
@@ -236,6 +245,8 @@ def run(script: dict) -> dict:
             except Exception: pass
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
+    try: _clean.unlink()
+    except Exception: pass
     for p in seg_paths:
         try: Path(p).unlink()
         except Exception: pass

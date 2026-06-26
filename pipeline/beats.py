@@ -49,8 +49,10 @@ def _decode_mono(path: str, ff: str = "") -> np.ndarray:
     ff = ff or _ffmpeg()
     # -nostdin + stdin=DEVNULL: ffmpeg must NEVER read the inherited stdin, or it can hang
     # forever (the montage analyze-beats subprocess inherits uvicorn's stdin).
-    # -vn drops any embedded cover-image / video stream (common in ripped "mp3" files).
-    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path), "-vn",
+    # -map 0:a:0? processes ONLY the first audio stream. Ripped "mp3" files embed a
+    # cover image as a bogus 90000-fps video stream; -vn alone doesn't stop ffmpeg from
+    # chewing on it (it hangs). Mapping just the audio sidesteps that entirely.
+    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0?", "-vn",
            "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
     out = subprocess.run(cmd, capture_output=True, timeout=180, stdin=subprocess.DEVNULL).stdout
     if not out:
@@ -66,8 +68,12 @@ def _decode_window(path: str, start: float, dur: float, ff: str = "") -> np.ndar
     fast input seek, so we never read the whole song just to time a short clip — this is
     the speed fix for montage analysis."""
     ff = ff or _ffmpeg()
-    cmd = [ff, "-nostdin", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
-           "-i", str(path), "-vn", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
+    # Output-seek (-ss AFTER -i) + map only the audio stream: a ripped file's bogus
+    # 90000-fps cover-art "video" makes input-seek crawl/hang, so we decode the audio
+    # stream only (fast even from 0) and seek within it.
+    cmd = [ff, "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0?", "-vn",
+           "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.1, dur):.3f}",
+           "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
     out = subprocess.run(cmd, capture_output=True, timeout=45, stdin=subprocess.DEVNULL).stdout
     if not out:
         raise RuntimeError("ffmpeg produced no audio for the window (start past song end?)")
