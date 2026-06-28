@@ -482,6 +482,16 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
         _seg_key(im.get("segment_type", "fact"), im.get("number", 0)): im.get("path", "")
         for im in script.get("images2", []) if isinstance(im, dict)
     }
+    # A SEQUENCE of images per segment (the web layer can send several): the segment is
+    # split into len(paths) equal slices, each its own image, so a long natural
+    # multi-sentence shot shows a NEW image every few seconds while the voice keeps
+    # flowing as ONE connected sentence — not a chopped line per picture. Generalizes
+    # the 2-image switch above. Falls back to [primary]+[2nd] when absent.
+    imgs_seq_by_key = {
+        _seg_key(im.get("segment_type", "fact"), im.get("number", 0)):
+            [p for p in (im.get("paths") or []) if p]
+        for im in script.get("images_seq", []) if isinstance(im, dict)
+    }
     # Veo motion clips (from the web review screen): segment → mp4. When a segment has
     # one, it plays the clip (looped/trimmed to the voiceover length) instead of a still.
     clip_by_key = {
@@ -695,29 +705,39 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
         down = f"scale={vid_w}:{vid_h}:flags=lanczos"       # SS canvas → final res
 
-        use_two = (img2_path and Path(img2_path).exists()
-                   and img_path and Path(img_path).exists()
-                   and seg.get("type") != "outro" and dur >= 6.0)
+        # Ordered list of images for THIS segment. A sequence (images_seq) lets a long,
+        # natural multi-sentence shot show a NEW image every few seconds while the voice
+        # stays one connected sentence. Fall back to [primary]+[optional 2nd] for older
+        # payloads / the autopilot. The outro stays a single calm shot.
+        seq = [p for p in imgs_seq_by_key.get(_seg_key(seg.get("type", "fact"), seg.get("number", 0)), [])
+               if p and Path(p).exists()]
+        if not seq:
+            seq = [p for p in (img_path, img2_path) if p and Path(p).exists()]
+        if seg.get("type") == "outro":
+            seq = seq[:1]
 
-        if use_two:
-            # Two images per segment: switch halfway with opposite motion, so long
-            # multi-sentence shots feel like video instead of a slideshow. Subtitles
-            # and the outro button draw AFTER the downscale (final resolution).
-            d1 = vdur / 2.0
-            d2 = vdur - d1
-            n1 = max(2, int(round(d1 * FPS)))
-            n2 = max(2, int(round(d2 * FPS)))
-            fc = (f"[0:v]{_kb(idx, n1)}[v0];"
-                  f"[1:v]{_kb(idx + 1, n2)}[v1];"
-                  f"[v0][v1]concat=n=2:v=1:a=0[vc];"
-                  f"[vc]{down}{sub_filter}{fade_f}{btn}[vout]")
-            cmd = [ff, "-y",
-                   "-loop", "1", "-framerate", "25", "-t", f"{d1:.3f}", "-i", str(img_path),
-                   "-loop", "1", "-framerate", "25", "-t", f"{d2:.3f}", "-i", str(img2_path),
-                   "-filter_complex", fc, "-map", "[vout]", "-an",
+        if len(seq) >= 2:
+            # Split vdur into len(seq) equal slices; each image gets its own Ken Burns
+            # (motion varies by index); concat. Subtitles/outro button draw AFTER the
+            # downscale on the combined stream (final resolution), exactly as before.
+            parts = len(seq)
+            base  = vdur / parts
+            durs  = [base] * parts
+            durs[-1] = vdur - base * (parts - 1)          # exact total length
+            ins, fc = [], []
+            for k, p in enumerate(seq):
+                ins += ["-loop", "1", "-framerate", "25", "-t", f"{durs[k]:.3f}", "-i", str(p)]
+                nk   = max(2, int(round(durs[k] * FPS)))
+                fc.append(f"[{k}:v]{_kb(idx + k, nk)}[v{k}]")
+            chain = "".join(f"[v{k}]" for k in range(parts))
+            fc.append(f"{chain}concat=n={parts}:v=1:a=0[vc]")
+            fc.append(f"[vc]{down}{sub_filter}{fade_f}{btn}[vout]")
+            cmd = [ff, "-y", *ins,
+                   "-filter_complex", ";".join(fc), "-map", "[vout]", "-an",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                    "-r", "25", str(seg_out)]
-        elif img_path and Path(img_path).exists():
+        elif seq:
+            img_path = seq[0]
             N = max(2, int(round(vdur * FPS)))              # total output frames
             vf = _kb(idx, N) + "," + down + sub_filter + fade_f + btn
             cmd = [ff, "-y",
