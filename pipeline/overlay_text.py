@@ -86,3 +86,79 @@ def bake_all(items) -> int:
         if bake(it.get("path", ""), it.get("text", ""), it.get("pos", "center")):
             ok += 1
     return ok
+
+
+def make_card(inner_path: str, out_path: str, cfg: dict) -> bool:
+    """Reproduce a MEME-CARD layout: a coloured vertical canvas with the generated image
+    as a horizontal strip in the middle and a caption in the margin — the exact "video
+    inside white space with a caption" format of viral reaction memes.
+
+    cfg: {canvas_w, canvas_h, inner_frac_h, header, header_pos ('top'|'bottom'), bg '#RRGGBB'}
+    Writes the composited card to out_path. Returns True on success.
+    """
+    try:
+        from PIL import Image, ImageDraw
+        CW = int(cfg.get("canvas_w") or 1080)
+        CH = int(cfg.get("canvas_h") or 1920)
+        # normalize to a sane vertical size (keep aspect)
+        if CH > 1920:
+            CW = int(CW * 1920 / CH); CH = 1920
+        bg = cfg.get("bg") or "#FFFFFF"
+        try:
+            bgc = tuple(int(bg.lstrip("#")[k:k + 2], 16) for k in (0, 2, 4))
+        except Exception:
+            bgc = (255, 255, 255)
+        canvas = Image.new("RGB", (CW, CH), bgc)
+
+        inner = Image.open(inner_path).convert("RGB")
+        # inner image spans the full canvas width; its height follows its own aspect
+        iw = CW
+        ih = max(1, int(inner.height * CW / inner.width))
+        inner = inner.resize((iw, ih), Image.LANCZOS)
+        # vertical position: centred, but leave room for the header in its margin
+        header = (cfg.get("header") or "").strip()
+        hpos = cfg.get("header_pos", "top")
+        if ih >= CH:                                    # inner taller than canvas → just center-crop
+            y = (CH - ih) // 2
+        elif header:
+            y = int(CH * 0.20) if hpos == "top" else int(CH * 0.80) - ih
+            y = max(int(CH * 0.14), min(y, CH - ih - int(CH * 0.14)))
+        else:
+            y = (CH - ih) // 2
+        canvas.paste(inner, (0, y))
+
+        if header:
+            d = ImageDraw.Draw(canvas)
+            size = max(30, int(CW * 0.052))
+            max_w = int(CW * 0.9)
+            while size > 22:
+                font = _load_bold_font(size, header)
+                if font.getlength(_ar_shape(header)) <= max_w:
+                    break
+                size -= 3
+            font = _load_bold_font(size, header)
+            shaped = _ar_shape(header)
+            tw = font.getlength(shaped)
+            tx = (CW - tw) / 2
+            # place text in the empty margin above / below the image
+            if hpos == "top":
+                ty = max(int(CH * 0.03), (y - size) // 2)
+            else:
+                ty = min(CH - int(size * 1.6), y + ih + (CH - (y + ih) - size) // 2)
+            ink = (17, 17, 17) if sum(bgc) > 380 else (255, 255, 255)   # dark text on light bg
+            d.text((tx, ty), shaped, font=font, fill=ink)
+
+        canvas.save(out_path, "JPEG", quality=92)
+        return True
+    except Exception as e:
+        log.warning(f"make_card failed for {Path(inner_path).name}: {e}")
+        return False
+
+
+def make_cards(items) -> int:
+    """items: [{inner, out, cfg}] → composite each card; returns how many succeeded."""
+    ok = 0
+    for it in items or []:
+        if make_card(it.get("inner", ""), it.get("out", ""), it.get("cfg", {})):
+            ok += 1
+    return ok
