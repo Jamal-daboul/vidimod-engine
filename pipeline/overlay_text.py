@@ -18,19 +18,25 @@ from pipeline.step4_assemble import _load_bold_font, _ar_shape
 
 
 def _wrap(text: str, font_for, max_w: int):
-    """Greedy word-wrap: returns a list of lines that each fit max_w px."""
-    words = (text or "").split()
-    lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if font_for.getlength(_ar_shape(trial)) <= max_w or not cur:
-            cur = trial
-        else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines[:4]                                   # never more than 4 lines
+    """Greedy word-wrap honouring explicit line breaks. Returns EVERY line — never drops
+    text (a hard line cap silently swallowed the end of long captions); the caller shrinks
+    the font until the whole block fits instead."""
+    out = []
+    for para in (text or "").replace("\r", "").split("\n"):
+        if not para.strip():
+            out.append("")                             # keep blank separator lines
+            continue
+        cur = ""
+        for w in para.split():
+            trial = (cur + " " + w).strip()
+            if font_for.getlength(_ar_shape(trial)) <= max_w or not cur:
+                cur = trial
+            else:
+                out.append(cur)
+                cur = w
+        if cur:
+            out.append(cur)
+    return out or [""]
 
 
 def bake(image_path: str, text: str, pos: str = "center", box=None) -> bool:
@@ -66,10 +72,12 @@ def bake(image_path: str, text: str, pos: str = "center", box=None) -> bool:
         avail_h = bh * H
         cx      = (bx + bw / 2) * W
 
-        # Largest font whose wrapped block fits BOTH the box width and its height.
-        best_size = max(14, int(H * 0.018))
-        best_lines = [text]
-        lo, hi = best_size, max(best_size + 1, int(avail_h * 1.2))
+        # Largest font whose FULL wrapped block fits the box (width AND height). The whole
+        # caption always survives — if it can't fit at any size we still draw every line at
+        # the floor size (slight overflow beats losing words).
+        floor = max(12, int(H * 0.014))
+        best_size = floor
+        lo, hi = floor, max(floor + 1, int(avail_h * 1.2))
         while lo <= hi:
             s = (lo + hi) // 2
             font = _load_bold_font(s, text)
@@ -77,13 +85,14 @@ def bake(image_path: str, text: str, pos: str = "center", box=None) -> bool:
             block_h = int(s * 1.25) * len(lines)
             widest = max((font.getlength(_ar_shape(ln)) for ln in lines), default=0)
             if block_h <= avail_h and widest <= max_w:
-                best_size, best_lines = s, lines
+                best_size = s
                 lo = s + 1
             else:
                 hi = s - 1
-        size, lines = best_size, best_lines
-
+        size = best_size
         font = _load_bold_font(size, text)
+        lines = _wrap(text, font, max_w)          # re-wrap at the FINAL size
+
         line_h  = int(size * 1.25)
         block_h = line_h * len(lines)
         y0 = int(by * H + (avail_h - block_h) / 2)
@@ -91,6 +100,8 @@ def bake(image_path: str, text: str, pos: str = "center", box=None) -> bool:
 
         stroke = max(2, size // 12)
         for i, ln in enumerate(lines):
+            if not ln.strip():                    # blank separator line — keep the gap only
+                continue
             shaped = _ar_shape(ln)
             lw = font.getlength(shaped)
             x = cx - lw / 2
