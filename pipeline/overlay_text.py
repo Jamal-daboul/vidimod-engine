@@ -33,8 +33,15 @@ def _wrap(text: str, font_for, max_w: int):
     return lines[:4]                                   # never more than 4 lines
 
 
-def bake(image_path: str, text: str, pos: str = "center") -> bool:
-    """Draw `text` onto the image in place. pos: top | center | bottom."""
+def bake(image_path: str, text: str, pos: str = "center", box=None) -> bool:
+    """Draw `text` onto the image in place, MATCHING the reference caption's size + place.
+
+    `box` (when given) = {x, y, w, h} as fractions 0-1 of the frame — the caption's measured
+    region in the source. The text is sized to FILL that box (wrapped to its width, largest
+    font whose block still fits its height) and centred inside it, so the remix's caption
+    lands exactly where the original's did at the same scale — instead of a giant centred
+    block covering the subject. Without a box it falls back to a modest lower-third layout.
+    """
     text = (text or "").strip()
     if not text:
         return True
@@ -44,30 +51,49 @@ def bake(image_path: str, text: str, pos: str = "center") -> bool:
         W, H = im.size
         d = ImageDraw.Draw(im)
 
-        # Font size scales with frame width; shrink until the longest line fits.
-        size = max(28, int(W * 0.075))
-        max_w = int(W * 0.86)
-        while size > 20:
-            font = _load_bold_font(size, text)
+        # ── Target region ──────────────────────────────────────────────────────────
+        if isinstance(box, dict) and float(box.get("w") or 0) > 0.05 and float(box.get("h") or 0) > 0.01:
+            bx = max(0.0, min(0.95, float(box.get("x", 0.08))))
+            by = max(0.0, min(0.97, float(box.get("y", 0.62))))
+            bw = max(0.15, min(1.0 - bx, float(box["w"])))
+            bh = max(0.03, min(1.0 - by, float(box["h"])))
+        else:
+            # modest defaults — never the huge centred block
+            bx, bw, bh = 0.08, 0.84, 0.14
+            by = {"top": 0.06, "bottom": 0.80}.get(pos, 0.64)   # default = lower third
+
+        max_w   = bw * W
+        avail_h = bh * H
+        cx      = (bx + bw / 2) * W
+
+        # Largest font whose wrapped block fits BOTH the box width and its height.
+        best_size = max(14, int(H * 0.018))
+        best_lines = [text]
+        lo, hi = best_size, max(best_size + 1, int(avail_h * 1.2))
+        while lo <= hi:
+            s = (lo + hi) // 2
+            font = _load_bold_font(s, text)
             lines = _wrap(text, font, max_w)
-            if all(font.getlength(_ar_shape(ln)) <= max_w for ln in lines):
-                break
-            size -= 4
+            block_h = int(s * 1.25) * len(lines)
+            widest = max((font.getlength(_ar_shape(ln)) for ln in lines), default=0)
+            if block_h <= avail_h and widest <= max_w:
+                best_size, best_lines = s, lines
+                lo = s + 1
+            else:
+                hi = s - 1
+        size, lines = best_size, best_lines
+
         font = _load_bold_font(size, text)
-        lines = _wrap(text, font, max_w)
-
-        line_h = int(size * 1.25)
+        line_h  = int(size * 1.25)
         block_h = line_h * len(lines)
-        y0 = {"top":    int(H * 0.08),
-              "bottom": int(H * 0.88) - block_h,
-              }.get(pos, (H - block_h) // 2)           # default: center
-        y0 = max(int(H * 0.04), min(y0, H - block_h - int(H * 0.04)))
+        y0 = int(by * H + (avail_h - block_h) / 2)
+        y0 = max(int(H * 0.01), min(y0, H - block_h - int(H * 0.01)))
 
-        stroke = max(3, size // 11)
+        stroke = max(2, size // 12)
         for i, ln in enumerate(lines):
             shaped = _ar_shape(ln)
             lw = font.getlength(shaped)
-            x = (W - lw) / 2
+            x = cx - lw / 2
             y = y0 + i * line_h
             d.text((x, y), shaped, font=font, fill="white",
                    stroke_width=stroke, stroke_fill="black")
@@ -80,10 +106,10 @@ def bake(image_path: str, text: str, pos: str = "center") -> bool:
 
 
 def bake_all(items) -> int:
-    """items: [{path, text, pos}] → bakes each; returns how many succeeded."""
+    """items: [{path, text, pos, box?}] → bakes each; returns how many succeeded."""
     ok = 0
     for it in items or []:
-        if bake(it.get("path", ""), it.get("text", ""), it.get("pos", "center")):
+        if bake(it.get("path", ""), it.get("text", ""), it.get("pos", "center"), it.get("box")):
             ok += 1
     return ok
 
