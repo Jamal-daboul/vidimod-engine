@@ -193,6 +193,17 @@ def _import_kokoro():
         return None
 
 
+def _script_chars(script: dict) -> int:
+    """Characters the AI voice will speak (human-recorded shots excluded)."""
+    human = script.get("human_voices") or {}
+    if script.get("type") == "long":
+        parts = [(f"section_{x.get('number')}", x.get("text")) for x in script.get("sections", [])]
+    else:
+        parts = [("hook", script.get("hook")), ("outro", script.get("outro"))]
+        parts += [(f"fact_{x.get('number')}", x.get("text")) for x in script.get("facts", [])]
+    return sum(len(t or "") for k, t in parts if not human.get(k))
+
+
 def _resolve_engine(script: dict):
     """Decide which TTS engine to use. Returns (engine, voice, ext).
 
@@ -211,10 +222,17 @@ def _resolve_engine(script: dict):
         from pipeline import tts_elevenlabs as el
         vid = el.resolve_voice(script)
         if el.api_key() and vid:
-            log.info(f"TTS engine=elevenlabs voice={vid} model={el.model(script)}")
-            return "elevenlabs", vid, ".mp3"
-        missing = "ELEVENLABS_API_KEY" if not el.api_key() else f"a voice for {language}"
-        log.warning(f"ElevenLabs selected but {missing} is not set → normal routing")
+            ok, why, est = el.preflight(_script_chars(script), script)
+            if ok:
+                log.info(f"TTS engine=elevenlabs voice={vid} model={el.model(script)} est_credits={est:.0f}")
+                return "elevenlabs", vid, ".mp3"
+            script["tts_fallback_reason"] = f"ElevenLabs skipped: {why}"
+            log.warning(f"{script['tts_fallback_reason']} → whole video uses the normal voice")
+        else:
+            missing = "ELEVENLABS_API_KEY" if not el.api_key() else f"a voice for {language}"
+            log.warning(f"ElevenLabs selected but {missing} is not set → normal routing")
+        if forced == "elevenlabs":
+            forced = "auto"
     # English defaults to Kokoro (natural, offline), but the user can force Google
     # Chirp3-HD ("google") or edge ("edge"). Only take the Kokoro path when it's
     # actually wanted — a "google" pick used to fall through here and ignore the

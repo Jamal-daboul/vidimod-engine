@@ -8,7 +8,11 @@ Configuration — a per-render value on the script wins over the environment:
   ELEVENLABS_VOICE_ID                 fallback for every language
   ELEVENLABS_DAILY_CHARACTER_LIMIT    credit ceiling per UTC day (default 10000)
   ELEVENLABS_CONCURRENCY              parallel requests (default 2 — the lowest plan limit)
-  ELEVENLABS_SPEED                    voice_settings.speed, 0.7–1.2 (unset = the voice's own)
+  ELEVENLABS_SPEED                    voice_settings.speed, 0.7–1.2 (script: elevenlabs_speed)
+  script elevenlabs_limits            {daily, per_video, reserve} credits, set by the owner in Video Lab
+
+A user picks a voice by its ID (script voice + tts_engine='elevenlabs'); the owner's per-language
+choice (elevenlabs_voices / env) is the fallback.
 
 Spending safety, mirroring the backend text gateway:
   * Credits are reserved in a SQLite ledger BEFORE each call and the daily ceiling is
@@ -65,8 +69,15 @@ def model(script: dict = None) -> str:
     return ((script or {}).get("elevenlabs_model") or os.getenv("ELEVENLABS_MODEL") or "eleven_multilingual_v2").strip()
 
 
+VOICE_ID = re.compile(r"^[A-Za-z0-9]{20}$")
+
+
 def resolve_voice(script: dict) -> str:
-    """Voice ID for this script's language and narrator gender, or '' if none is set."""
+    """Voice ID for this script's language and narrator gender, or '' if none is set.
+    A voice the user picked (script voice, tts_engine='elevenlabs') wins."""
+    picked = str(script.get("voice") or "").strip()
+    if str(script.get("tts_engine") or "").lower() == "elevenlabs" and VOICE_ID.match(picked):
+        return picked
     lang = str(script.get("language") or "English").strip()
     sex = str(script.get("voice_sex") or "female").strip().lower()
     chosen = script.get("elevenlabs_voices") or {}
@@ -83,11 +94,29 @@ def resolve_voice(script: dict) -> str:
     return ""
 
 
-def daily_limit() -> float:
-    try:
-        return max(0.0, float(os.getenv("ELEVENLABS_DAILY_CHARACTER_LIMIT", "10000")))
-    except ValueError:
-        return 10000.0
+DEFAULT_LIMITS = {"daily": 3000.0, "per_video": 1200.0, "reserve": 1000.0}
+
+
+def limits(script: dict = None) -> dict:
+    """Owner's credit limits: Video Lab values on the script win, then env, then defaults."""
+    out = dict(DEFAULT_LIMITS)
+    env = os.getenv("ELEVENLABS_DAILY_CHARACTER_LIMIT", "").strip()
+    if env:
+        try:
+            out["daily"] = float(env)
+        except ValueError:
+            pass
+    for k, v in ((script or {}).get("elevenlabs_limits") or {}).items():
+        try:
+            if k in out and v is not None and float(v) >= 0:
+                out[k] = float(v)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def daily_limit(script: dict = None) -> float:
+    return limits(script)["daily"]
 
 
 def credits_per_char(model_id: str) -> float:
@@ -120,14 +149,86 @@ def _today() -> str:
     return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
-def _reserve(voice_id: str, model_id: str, text: str) -> str:
-    est = len(text) * credits_per_char(model_id)
+def credit_ratio(model_id: str) -> float:
+    """Credits actually billed per character, learned from the last 40 successful calls
+    (plans differ: 1.0 on Free, ~0.25 measured on the paid plan). Falls back to the
+    model's list rate until there are 3 data points."""
+    try:
+        with _db() as con:
+            rows = con.execute("SELECT credits, chars FROM calls WHERE status='ok' AND chars>0 AND credits>0 "
+                               "AND model=? ORDER BY ts DESC LIMIT 40", (model_id,)).fetchall()
+    except sqlite3.Error:
+        rows = []
+    if len(rows) < 3:
+        return credits_per_char(model_id)
+    ratio = sum(r["credits"] for r in rows) / sum(r["chars"] for r in rows)
+    return max(0.05, min(credits_per_char(model_id), ratio))
+
+
+def estimate(chars: int, model_id: str) -> float:
+    """Conservative credit estimate: learned rate + 25%, never above the list rate."""
+    return chars * min(credits_per_char(model_id), credit_ratio(model_id) * 1.25)
+
+
+_ACCOUNT_CACHE = LEDGER.with_name("elevenlabs_account.json")
+
+
+def account_remaining():
+    """Credits left on the ElevenLabs account, or None if the key can't read it
+    (needs the User → Read permission). Cached 10 minutes."""
+    import json
+    try:
+        c = json.loads(_ACCOUNT_CACHE.read_text(encoding="utf-8"))
+        if time.time() - c.get("ts", 0) < 600:
+            return c.get("remaining")
+    except Exception:
+        pass
+    remaining = None
+    try:
+        r = requests.get("https://api.elevenlabs.io/v1/user/subscription", headers={"xi-api-key": api_key()}, timeout=15)
+        if r.ok:
+            d = r.json()
+            remaining = max(0.0, float(d.get("character_limit") or 0) - float(d.get("character_count") or 0))
+    except Exception:
+        remaining = None
+    try:
+        _ACCOUNT_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _ACCOUNT_CACHE.write_text(json.dumps({"ts": time.time(), "remaining": remaining}), encoding="utf-8")
+    except Exception:
+        pass
+    return remaining
+
+
+def used_today() -> float:
+    with _db() as con:
+        return con.execute("SELECT COALESCE(SUM(MAX(credits, reserved)), 0) FROM calls WHERE day=?", (_today(),)).fetchone()[0]
+
+
+def preflight(chars: int, script: dict) -> tuple:
+    """(ok, reason, estimate) for a WHOLE render before any audio is made, so a video
+    never switches voice halfway because a limit was hit mid-render."""
+    model_id, lim = model(script), limits(script)
+    est = estimate(chars, model_id)
+    if est > lim["per_video"]:
+        return False, f"video needs ~{est:.0f} credits, over the per-video limit of {lim['per_video']:.0f}", est
+    used = used_today()
+    if used + est > lim["daily"]:
+        return False, f"daily ElevenLabs limit: {used:.0f} used + ~{est:.0f} > {lim['daily']:.0f} credits", est
+    remaining = account_remaining()
+    if remaining is not None and remaining - est < lim["reserve"]:
+        return False, f"account balance protected: {remaining:.0f} left, keeping {lim['reserve']:.0f} in reserve", est
+    return True, "", est
+
+
+def _reserve(voice_id: str, model_id: str, text: str, script: dict = None) -> str:
+    est = estimate(len(text), model_id)
     rid, day = uuid.uuid4().hex, _today()
+    ceiling = daily_limit(script)
     with _db() as con:
         con.execute("BEGIN IMMEDIATE")
         used = con.execute("SELECT COALESCE(SUM(MAX(credits, reserved)), 0) FROM calls WHERE day=?", (day,)).fetchone()[0]
-        if used + est > daily_limit():
-            raise BudgetError(f"daily ElevenLabs ceiling reached ({used:.0f}+{est:.0f} > {daily_limit():.0f} credits)")
+        if used + est > ceiling:
+            raise BudgetError(f"daily ElevenLabs ceiling reached ({used:.0f}+{est:.0f} > {ceiling:.0f} credits)")
         con.execute("INSERT INTO calls VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (rid, time.time(), day, voice_id, model_id, len(text), 0.0, est, "pending", ""))
     return rid
@@ -187,14 +288,17 @@ def synth(text: str, path: str, voice_id: str, script: dict, circuit: dict) -> t
     key, model_id = api_key(), model(script)
     if not key:
         raise AccountError("ELEVENLABS_API_KEY is not set")
-    rid = _reserve(voice_id, model_id, text)
+    rid = _reserve(voice_id, model_id, text, script)
 
     body = {"text": text, "model_id": model_id}
     if ("flash" in model_id or "turbo" in model_id or "v3" in model_id) and LANG_CODES.get(script.get("language")):
         body["language_code"] = LANG_CODES[script["language"]]
-    speed = os.getenv("ELEVENLABS_SPEED", "").strip()
-    if speed:
-        body["voice_settings"] = {"speed": max(0.7, min(1.2, float(speed)))}
+    speed = script.get("elevenlabs_speed") or os.getenv("ELEVENLABS_SPEED", "").strip()
+    try:
+        if speed and abs(float(speed) - 1.0) > 1e-3:
+            body["voice_settings"] = {"speed": max(0.7, min(1.2, float(speed)))}
+    except (TypeError, ValueError):
+        pass
 
     for attempt in range(4):
         try:

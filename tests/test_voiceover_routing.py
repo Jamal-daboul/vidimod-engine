@@ -14,7 +14,26 @@ from pipeline import step2_voiceover as vo          # noqa: E402
 from pipeline import tts_elevenlabs as el           # noqa: E402
 
 
-class Routing(unittest.TestCase):
+class Isolated(unittest.TestCase):
+    """Temp ledger + no network for the account-balance lookup."""
+    remaining = None
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        ledger = Path(self.tmp.name) / "u.sqlite3"
+        self.patches = [patch.object(el, "LEDGER", ledger),
+                        patch.object(el, "_ACCOUNT_CACHE", Path(self.tmp.name) / "acct.json"),
+                        patch.object(el, "account_remaining", side_effect=lambda: self.remaining)]
+        for x in self.patches:
+            x.start()
+
+    def tearDown(self):
+        for x in self.patches:
+            x.stop()
+        self.tmp.cleanup()
+
+
+class Routing(Isolated):
     def env(self, **kv):
         base = {"TTS_PROVIDER": "", "ELEVENLABS_API_KEY": "", "ELEVENLABS_VOICE_ID": "",
                 "ELEVENLABS_VOICE_ARABIC": "", "GOOGLE_TTS_API_KEY": ""}
@@ -47,13 +66,7 @@ class Routing(unittest.TestCase):
                 del os.environ["ELEVENLABS_VOICE_ARABIC_MALE"]
 
 
-class Ledger(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.p = patch.object(el, "LEDGER", Path(self.tmp.name) / "u.sqlite3"); self.p.start()
-
-    def tearDown(self):
-        self.p.stop(); self.tmp.cleanup()
+class Ledger(Isolated):
 
     def test_daily_ceiling_blocks_before_calling(self):
         with patch.dict(os.environ, {"ELEVENLABS_DAILY_CHARACTER_LIMIT": "10", "ELEVENLABS_API_KEY": "k"}), \
@@ -93,6 +106,60 @@ class Ledger(unittest.TestCase):
         self.assertEqual([m["text"] for m in marks], ["Hi you.", "Bye"])
         self.assertAlmostEqual(marks[1]["start"], 0.8)
         self.assertEqual(el.usage_today()["credits"], 9.0)
+
+
+class Guards(Isolated):
+    EL = {"TTS_PROVIDER": "", "ELEVENLABS_API_KEY": "k", "ELEVENLABS_VOICE_ARABIC": "adminVoiceAAAAAAAAAAA",
+          "ELEVENLABS_DAILY_CHARACTER_LIMIT": "", "GOOGLE_TTS_API_KEY": ""}
+
+    def script(self, chars=100, **kv):
+        return {"language": "Arabic", "hook": "x" * chars, "facts": [], "outro": "", **kv}
+
+    def test_user_picked_voice_wins_over_admin_voice(self):
+        with patch.dict(os.environ, self.EL):
+            eng, vid, _ = vo._resolve_engine(self.script(tts_engine="elevenlabs", voice="rPNcQ53R703tTmtue1AT"))
+        self.assertEqual((eng, vid), ("elevenlabs", "rPNcQ53R703tTmtue1AT"))
+
+    def test_chirp_name_is_never_treated_as_a_voice_id(self):
+        with patch.dict(os.environ, self.EL):
+            self.assertEqual(el.resolve_voice({"language": "Arabic", "tts_engine": "elevenlabs", "voice": "Callirrhoe"}),
+                             "adminVoiceAAAAAAAAAAA")
+
+    def test_video_over_per_video_limit_uses_free_voice_for_the_whole_render(self):
+        s = self.script(chars=2000, tts_engine="elevenlabs", voice="rPNcQ53R703tTmtue1AT")
+        with patch.dict(os.environ, self.EL):
+            eng, _, _ = vo._resolve_engine(s)
+        self.assertEqual(eng, "edge")
+        self.assertIn("per-video limit", s["tts_fallback_reason"])
+
+    def test_owner_limits_on_script_override_defaults(self):
+        s = self.script(chars=2000, tts_engine="elevenlabs", voice="rPNcQ53R703tTmtue1AT",
+                        elevenlabs_limits={"per_video": 5000, "daily": 9000})
+        with patch.dict(os.environ, self.EL):
+            self.assertEqual(vo._resolve_engine(s)[0], "elevenlabs")
+
+    def test_account_reserve_protects_the_balance(self):
+        self.remaining = 1100            # 1100 left, reserve 1000 → a 200-credit video must not run
+        s = self.script(chars=200, tts_engine="elevenlabs", voice="rPNcQ53R703tTmtue1AT")
+        with patch.dict(os.environ, self.EL):
+            self.assertEqual(vo._resolve_engine(s)[0], "edge")
+        self.assertIn("balance protected", s["tts_fallback_reason"])
+
+    def test_estimate_learns_the_real_rate_from_the_ledger(self):
+        model_id = "eleven_multilingual_v2"
+        self.assertEqual(el.estimate(1000, model_id), 1000)               # no history → list rate
+        for i in range(5):
+            rid = el._reserve("v", model_id, "x" * 100)
+            el._finish(rid, "ok", credits=25)                             # measured 0.25/char
+        with el._db() as con:
+            con.execute("UPDATE calls SET chars=100")
+        self.assertAlmostEqual(el.credit_ratio(model_id), 0.25)
+        self.assertAlmostEqual(el.estimate(1000, model_id), 312.5)        # +25% margin
+
+    def test_human_recorded_shots_are_not_counted(self):
+        s = {"hook": "a" * 50, "facts": [{"number": 1, "text": "b" * 70}], "outro": "c" * 30,
+             "human_voices": {"fact_1": "/x.wav"}}
+        self.assertEqual(vo._script_chars(s), 80)
 
 
 class Fallbacks(unittest.TestCase):
