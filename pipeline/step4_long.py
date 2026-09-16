@@ -529,6 +529,15 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
 
     Path("output/videos").mkdir(parents=True, exist_ok=True)
 
+    # Wiggle stereoscopy on every still (see pipeline/wiggle.py). Depth + views are built
+    # up front so they don't fight the parallel ffmpeg segment builds for CPU; any failure
+    # leaves that image as a plain still. What actually ran is recorded on the script.
+    from pipeline import wiggle
+    wiggle.configure(script)
+    _animated = {k for k, v in clip_by_key.items() if v and Path(v).exists()}   # Veo shots skip the still
+    wiggle.prepare_many([p for k, p in [*img_by_key.items(), *img2_by_key.items()] if k not in _animated]
+                        + [p for k, ps in imgs_seq_by_key.items() if k not in _animated for p in ps], fps=25)
+
     # ── ONE continuous audio timeline ─────────────────────────────────────────
     # The voice used to live inside each segment file, so every video join was
     # also an AUDIO join — and every audio join was an opportunity for an audible
@@ -726,7 +735,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             durs[-1] = vdur - base * (parts - 1)          # exact total length
             ins, fc = [], []
             for k, p in enumerate(seq):
-                ins += ["-loop", "1", "-framerate", "25", "-t", f"{durs[k]:.3f}", "-i", str(p)]
+                ins += wiggle.still_input(p, 25, durs[k])
                 nk   = max(2, int(round(durs[k] * FPS)))
                 fc.append(f"[{k}:v]{_kb(idx + k, nk)}[v{k}]")
             chain = "".join(f"[v{k}]" for k in range(parts))
@@ -741,7 +750,7 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
             N = max(2, int(round(vdur * FPS)))              # total output frames
             vf = _kb(idx, N) + "," + down + sub_filter + fade_f + btn
             cmd = [ff, "-y",
-                   "-loop", "1", "-framerate", "25", "-t", f"{vdur:.3f}", "-i", str(img_path),
+                   *wiggle.still_input(img_path, 25, vdur),
                    "-vf", vf, "-an",
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
                    "-r", "25", str(seg_out)]
@@ -766,6 +775,8 @@ def _assemble_web_long(script: dict, segments: list, out_path: str, ts: str,
     with _cf.ThreadPoolExecutor(max_workers=_workers) as pool:
         seg_paths = list(pool.map(_make_seg,
                                   [(i, s, seg_lens[i]) for i, s in enumerate(segments)]))
+    script["still_motion"] = wiggle.summary()
+    log.info(f"[wiggle] {script['still_motion']}")
 
     if any(p is None for p in seg_paths):
         # The audio timeline is already scheduled — a missing video segment would

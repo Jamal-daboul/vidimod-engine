@@ -202,6 +202,19 @@ def _resolve_engine(script: dict):
     """
     language = script.get("language", "English")
     forced   = (script.get("tts_engine") or "auto").lower()
+
+    # ElevenLabs is an ADMIN choice (TTS_PROVIDER / script tts_provider), so it outranks the
+    # per-video default the frontend always sends ('google' for non-English). Only an
+    # explicit 'edge' opts a script out. Needs a key AND a voice for this language.
+    provider = str(script.get("tts_provider") or os.getenv("TTS_PROVIDER", "auto")).strip().lower()
+    if forced == "elevenlabs" or (provider == "elevenlabs" and forced != "edge"):
+        from pipeline import tts_elevenlabs as el
+        vid = el.resolve_voice(script)
+        if el.api_key() and vid:
+            log.info(f"TTS engine=elevenlabs voice={vid} model={el.model(script)}")
+            return "elevenlabs", vid, ".mp3"
+        missing = "ELEVENLABS_API_KEY" if not el.api_key() else f"a voice for {language}"
+        log.warning(f"ElevenLabs selected but {missing} is not set → normal routing")
     # English defaults to Kokoro (natural, offline), but the user can force Google
     # Chirp3-HD ("google") or edge ("edge"). Only take the Kokoro path when it's
     # actually wanted — a "google" pick used to fall through here and ignore the
@@ -248,6 +261,7 @@ def _run_jobs_kokoro(jobs: list, voice: str) -> list:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 words = kokoro.synth(job["text"], job["path"], voice)
+                job["tts_engine"], job["tts_model"] = "kokoro", voice
                 break
             except Exception as e:
                 log.warning(f"Kokoro attempt {attempt}/{MAX_ATTEMPTS} for '{job['text'][:30]}…': {e}")
@@ -261,20 +275,23 @@ def _run_jobs_kokoro(jobs: list, voice: str) -> list:
 
 def _run_jobs_google(jobs: list, voice: str, script: dict) -> list:
     """Synthesize all jobs with Google Cloud TTS (Chirp3-HD). Returns [(job, words)]
-    like the other engines. words is [] — Chirp3-HD returns no per-word timestamps,
-    so subtitles spread each segment's text proportionally across its duration
-    (subtitles.py already does this when words is empty). Any segment Google can't
-    produce falls back to edge-tts so a video never ends up with a missing segment."""
+    like the other engines. words is [] — Chirp3-HD returns no per-word timings,
+    so subtitles spread each segment's text proportionally across its duration.
+    Any segment Google can't produce falls back to edge-tts so a video never ends up
+    with a missing segment. An account-level error (billing disabled, bad key, no
+    permission) stops calling Google for the rest of the render — it used to burn
+    MAX_ATTEMPTS failed calls on EVERY segment before falling back."""
     import base64
     import requests
     key        = os.getenv("GOOGLE_TTS_API_KEY", "")
     locale     = voice.split("-Chirp3-HD-")[0]               # "ar-XA-Chirp3-HD-Kore" → "ar-XA"
     url        = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={key}"
-    edge_voice = _pick_voice(script)                         # for per-segment fallback
-    results    = []
+    results, fallback, dead = [], [], ""
     for job in jobs:
-        audio_b64 = None
+        audio_b64, last_err = None, ""
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            if dead:
+                break
             try:
                 r = requests.post(url, timeout=60, json={
                     "input":       {"text": job["text"]},
@@ -288,28 +305,84 @@ def _run_jobs_google(jobs: list, voice: str, script: dict) -> list:
                                     "speakingRate":    GOOGLE_RATE},
                 })
                 if r.status_code != 200:
-                    log.warning(f"Google TTS HTTP {r.status_code} ({attempt}/{MAX_ATTEMPTS}): {r.text[:160]}")
+                    last_err = f"Google TTS HTTP {r.status_code}"
+                    try:
+                        err = r.json().get("error", {})
+                        reason = next((d.get("reason") for d in err.get("details", [])
+                                       if isinstance(d, dict) and d.get("reason")), "")
+                        last_err = " ".join(x for x in (last_err, err.get("status", ""), reason) if x)
+                    except Exception:
+                        pass
+                    log.warning(f"{last_err} ({attempt}/{MAX_ATTEMPTS}): {r.text[:160]}")
+                    if r.status_code in (400, 401, 403, 404):
+                        dead = last_err
+                        log.error(f"Google TTS unusable for this render ({dead}) → edge-tts for the rest")
                     continue
                 audio_b64 = r.json().get("audioContent")
                 if audio_b64:
                     break
-                log.warning(f"Google TTS returned no audio ({attempt}/{MAX_ATTEMPTS})")
+                last_err = "Google TTS returned no audio"
+                log.warning(f"{last_err} ({attempt}/{MAX_ATTEMPTS})")
             except Exception as e:
+                last_err = f"Google TTS {type(e).__name__}"
                 log.warning(f"Google TTS attempt {attempt}/{MAX_ATTEMPTS} for '{job['text'][:30]}…': {e}")
         if audio_b64:
             Path(job["path"]).write_bytes(base64.b64decode(audio_b64))
             if Path(job["path"]).exists() and Path(job["path"]).stat().st_size > 0:
+                job["tts_engine"], job["tts_model"] = "google", voice
                 results.append((job, []))           # empty words → proportional subtitles
                 continue
-        # Google failed for this segment → edge-tts so the audio is never missing.
-        # Edge writes MP3, so use a .mp3 path (the Google path is .wav) and point the
-        # segment at it; moviepy reads either container fine.
-        log.warning(f"Google TTS failed for '{job['text'][:30]}…' → edge-tts fallback")
-        mp3 = str(Path(job["path"]).with_suffix(".mp3"))
-        ok, words = speak(job["text"], mp3, edge_voice)
-        if ok:
-            job["path"] = mp3
-        results.append((job, words if ok else None))
+        job["tts_fallback_reason"] = dead or last_err or "Google TTS failed"
+        fallback.append(job)
+    results += _edge_fallback(fallback, script, "google")
+    return results
+
+
+def _edge_fallback(jobs: list, script: dict, failed_engine: str) -> list:
+    """Re-synthesize the jobs another engine couldn't produce with free edge-tts
+    (concurrently). Edge writes MP3, so each job's path switches to .mp3."""
+    if not jobs:
+        return []
+    edge_voice = _pick_voice(script)
+    for job in jobs:
+        job["path"] = str(Path(job["path"]).with_suffix(".mp3"))
+    log.warning(f"{failed_engine} failed for {len(jobs)} segment(s) → edge-tts ({edge_voice})")
+    out = asyncio.run(_run_jobs(jobs, edge_voice))
+    for job, _words in out:
+        job["tts_engine"], job["tts_model"] = "edge", edge_voice
+    return out
+
+
+def _run_jobs_elevenlabs(jobs: list, voice_id: str, script: dict) -> list:
+    """Synthesize all jobs with ElevenLabs (bounded concurrency). Segments it can't
+    produce — daily ceiling, account error, one-off failure — fall back to edge-tts."""
+    import concurrent.futures as cf
+    from pipeline import tts_elevenlabs as el
+    model_id, circuit = el.model(script), {}
+    workers = max(1, int(os.getenv("ELEVENLABS_CONCURRENCY", "2") or 2))
+    results, fallback = [], []
+
+    def work(job):
+        try:
+            marks, credits = el.synth(job["text"], job["path"], voice_id, script, circuit)
+            job.update(tts_engine="elevenlabs", tts_model=model_id, tts_voice=voice_id, tts_credits=credits)
+            return job, marks
+        except Exception as e:
+            job["tts_fallback_reason"] = f"{type(e).__name__}: {str(e)[:140]}"
+            log.warning(f"ElevenLabs → fallback for '{job['text'][:30]}…': {job['tts_fallback_reason']}")
+            try:
+                Path(job["path"]).unlink()
+            except Exception:
+                pass
+            return job, None
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        for job, marks in pool.map(work, jobs):
+            if marks is None:
+                fallback.append(job)
+            else:
+                results.append((job, marks))
+    results += _edge_fallback(fallback, script, "elevenlabs")
     return results
 
 
@@ -344,6 +417,7 @@ def run(script: dict) -> dict:
         return j["type"] if j["type"] in ("hook", "outro") else f"fact_{j.get('number')}"
 
     engine, voice, ext = _resolve_engine(script)
+    script["tts_requested_engine"] = engine   # what was SELECTED; tts_engine below = what RAN
     script["tts_engine"] = engine
     script["tts_voice"]  = voice
     ts    = script.get("created_at", str(script.get("timestamp", "0"))).replace(":", "-").replace(".", "-")[:19]
@@ -384,8 +458,12 @@ def run(script: dict) -> dict:
         results = _run_jobs_kokoro(tts_jobs, voice)
     elif engine == "google":
         results = _run_jobs_google(tts_jobs, voice, script)
+    elif engine == "elevenlabs":
+        results = _run_jobs_elevenlabs(tts_jobs, voice, script)
     else:
         results = asyncio.run(_run_jobs(tts_jobs, voice))
+        for job, _w in results:
+            job["tts_engine"], job["tts_model"] = "edge", voice
     done = {id(job): words for job, words in results}
 
     # Reassemble in the original segment order (human + AI), so the timeline lines up.
@@ -396,6 +474,7 @@ def run(script: dict) -> dict:
             if _use_human_audio(human[_jkey(j)], dest):
                 seg = {k: v for k, v in j.items()}
                 seg["path"], seg["words"], seg["human"] = dest, [], True   # no word timings → subtitles split proportionally
+                seg["tts_engine"], seg["tts_model"] = "human", "recorded voice"
                 segments.append(seg)
                 log.info(f"Voiceover: HUMAN recording for {_jkey(j)}")
             else:
@@ -410,7 +489,16 @@ def run(script: dict) -> dict:
         segments.append(seg)
 
     script["audio_segments"] = segments
-    log.info(f"Generated {len(segments)}/{len(jobs)} audio segments")
+    # Record what ACTUALLY produced the audio — per segment and overall. tts_engine used to
+    # keep the SELECTED engine, so a render whose Google calls all failed over to edge still
+    # said 'google' (and the backend billed it at Google's per-character rate).
+    used = sorted({s.get("tts_engine") for s in segments if s.get("tts_engine") not in (None, "human")})
+    script["tts_engines_used"] = used
+    script["tts_engine"] = used[0] if len(used) == 1 else ("mixed" if used else engine)
+    fell_back = [s for s in segments if s.get("tts_fallback_reason")]
+    note = f" fallback={len(fell_back)} ({fell_back[0]['tts_fallback_reason']})" if fell_back else ""
+    log.info(f"Generated {len(segments)}/{len(jobs)} audio segments — requested={engine} "
+             f"actual={used or [engine]}{note}")
 
     if script.get("script_path"):
         with open(script["script_path"], "w", encoding="utf-8") as f:

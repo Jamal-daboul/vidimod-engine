@@ -149,6 +149,13 @@ def run(script: dict) -> dict:
 
     Path("output/videos").mkdir(parents=True, exist_ok=True)
 
+    # Wiggle stereoscopy on every still poster (see pipeline/wiggle.py); shots that play a
+    # Veo clip skip it. Built up front, recorded on the script.
+    from pipeline import wiggle
+    wiggle.configure(script)
+    wiggle.prepare_many([img for i, img in enumerate(frames)
+                         if not (clip_by_num.get(i + 1) and Path(clip_by_num[i + 1]).exists())], fps=FPS)
+
     # ── Build one video-only segment per shot (parallel) ───────────────────────
     def _make_seg(args):
         idx, img = args
@@ -168,8 +175,7 @@ def run(script: dict) -> dict:
         else:
             n_frames = max(2, int(round(seg_len * FPS)))
             vf = _motion_vf(idx, intensity, W, H, n_frames) + flash
-            cmd = [ff, "-y", "-loop", "1", "-framerate", str(FPS),
-                   "-t", f"{seg_len:.3f}", "-i", str(img),
+            cmd = [ff, "-y", *wiggle.still_input(img, FPS, seg_len),
                    "-vf", vf, "-an", "-r", str(FPS),
                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(seg_out)]
         ok = _run_ffmpeg(cmd, timeout=180)
@@ -177,6 +183,8 @@ def run(script: dict) -> dict:
 
     with _cf.ThreadPoolExecutor(max_workers=8) as pool:
         seg_paths = list(pool.map(_make_seg, list(enumerate(frames))))
+    script["still_motion"] = wiggle.summary()
+    log.info(f"[wiggle] {script['still_motion']}")
 
     if any(p is None for p in seg_paths):
         bad = [i for i, p in enumerate(seg_paths) if p is None]

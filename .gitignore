@@ -16,3 +16,6 @@ venv/
 output/
 logs/
 *.mp4
+
+# Downloaded model weights (depth model for wiggle stereoscopy, ~100 MB) — fetched on the server
+models/
