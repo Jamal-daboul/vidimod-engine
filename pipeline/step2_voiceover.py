@@ -494,11 +494,11 @@ def run(script: dict) -> dict:
     # said 'google' (and the backend billed it at Google's per-character rate).
     used = sorted({s.get("tts_engine") for s in segments if s.get("tts_engine") not in (None, "human")})
     script["tts_engines_used"] = used
-    script["tts_engine"] = used[0] if len(used) == 1 else ("mixed" if used else engine)
+    script["tts_engine"] = used[0] if len(used) == 1 else ("mixed" if used else "none")
     fell_back = [s for s in segments if s.get("tts_fallback_reason")]
     note = f" fallback={len(fell_back)} ({fell_back[0]['tts_fallback_reason']})" if fell_back else ""
     log.info(f"Generated {len(segments)}/{len(jobs)} audio segments — requested={engine} "
-             f"actual={used or [engine]}{note}")
+             f"actual={used or ['none']}{note}")
 
     if script.get("script_path"):
         with open(script["script_path"], "w", encoding="utf-8") as f:
