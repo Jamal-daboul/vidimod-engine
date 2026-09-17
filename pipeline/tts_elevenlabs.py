@@ -17,8 +17,9 @@ choice (elevenlabs_voices / env) is the fallback.
 Spending safety, mirroring the backend text gateway:
   * Credits are reserved in a SQLite ledger BEFORE each call and the daily ceiling is
     enforced atomically, so parallel segments can't overshoot it.
-  * No retry after a timeout (the request may have been billed); only a "too many
-    concurrent requests" 429 — which is never billed — is retried.
+  * No retry after a timeout (the request may have been billed). Unbilled conflicts are
+    retried with backoff: 429 "too many concurrent requests" and 409 "already_running"
+    (ElevenLabs rejects a parallel request while it is still loading a cold library voice).
   * An account/billing/permission error opens a circuit for the rest of the render
     instead of failing once per segment.
 The caller falls back to free edge-tts for any segment this module can't produce.
@@ -300,7 +301,7 @@ def synth(text: str, path: str, voice_id: str, script: dict, circuit: dict) -> t
     except (TypeError, ValueError):
         pass
 
-    for attempt in range(4):
+    for attempt in range(6):
         try:
             r = requests.post(API.format(voice=voice_id), params={"output_format": OUTPUT_FORMAT},
                               headers={"xi-api-key": key, "content-type": "application/json"},
@@ -315,8 +316,10 @@ def synth(text: str, path: str, voice_id: str, script: dict, circuit: dict) -> t
                 detail = (d.get("code") or d.get("status") or "") if isinstance(d, dict) else str(d)
             except Exception:
                 detail = ""
-        if r.status_code == 429 and "concurrent" in detail and attempt < 3:
-            time.sleep(1.5 * (attempt + 1))                     # not billed — safe to wait and retry
+        retryable = (r.status_code == 429 and "concurrent" in detail) or r.status_code == 409 \
+            or r.status_code in (500, 502, 503, 504)
+        if retryable and attempt < 5:
+            time.sleep(2.0 * (attempt + 1))                     # not billed — safe to wait and retry
             continue
         break
 

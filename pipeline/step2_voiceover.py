@@ -372,36 +372,63 @@ def _edge_fallback(jobs: list, script: dict, failed_engine: str) -> list:
 
 
 def _run_jobs_elevenlabs(jobs: list, voice_id: str, script: dict) -> list:
-    """Synthesize all jobs with ElevenLabs (bounded concurrency). Segments it can't
-    produce — daily ceiling, account error, one-off failure — fall back to edge-tts."""
+    """Synthesize all jobs with ElevenLabs, keeping ONE voice for the whole video.
+
+    1. The first line runs alone: a cold library voice rejects parallel requests
+       (409 already_running) while it loads — that once sent a hook to edge-tts.
+    2. The rest run with bounded concurrency; lines that still failed get one more
+       sequential try.
+    3. If any line is still missing, the WHOLE video is re-voiced with edge-tts, so a
+       viewer never hears the narrator change mid-video. Credits already spent on the
+       ElevenLabs lines are lost (rare), and the user is not billed for them."""
     import concurrent.futures as cf
+    import time as _time
     from pipeline import tts_elevenlabs as el
     model_id, circuit = el.model(script), {}
     workers = max(1, int(os.getenv("ELEVENLABS_CONCURRENCY", "2") or 2))
-    results, fallback = [], []
+    done, failed = {}, {}
 
     def work(job):
         try:
             marks, credits = el.synth(job["text"], job["path"], voice_id, script, circuit)
             job.update(tts_engine="elevenlabs", tts_model=model_id, tts_voice=voice_id, tts_credits=credits)
-            return job, marks
+            job.pop("tts_fallback_reason", None)
+            return job, marks, ""
         except Exception as e:
-            job["tts_fallback_reason"] = f"{type(e).__name__}: {str(e)[:140]}"
-            log.warning(f"ElevenLabs → fallback for '{job['text'][:30]}…': {job['tts_fallback_reason']}")
             try:
                 Path(job["path"]).unlink()
             except Exception:
                 pass
-            return job, None
+            return job, None, f"{type(e).__name__}: {str(e)[:140]}"
 
+    def record(job, marks, err):
+        if marks is None:
+            failed[id(job)] = (job, err)
+            log.warning(f"ElevenLabs failed for '{job['text'][:30]}…': {err}")
+        else:
+            failed.pop(id(job), None)
+            done[id(job)] = (job, marks)
+
+    if jobs:
+        record(*work(jobs[0]))                               # warm the voice
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-        for job, marks in pool.map(work, jobs):
-            if marks is None:
-                fallback.append(job)
-            else:
-                results.append((job, marks))
-    results += _edge_fallback(fallback, script, "elevenlabs")
-    return results
+        for res in pool.map(work, jobs[1:]):
+            record(*res)
+    if failed and not circuit.get("open"):
+        _time.sleep(3)
+        for job, _err in list(failed.values()):
+            record(*work(job))
+
+    if not failed:
+        return [done[id(j)] for j in jobs]
+    reason = next(iter(failed.values()))[1]
+    for job in jobs:
+        job["tts_fallback_reason"] = (f"ElevenLabs failed on {len(failed)}/{len(jobs)} line(s) ({reason}) → "
+                                      "whole video re-voiced with the free voice so the narrator never changes")
+        for k in ("tts_voice", "tts_credits"):
+            job.pop(k, None)
+    log.error(jobs[0]["tts_fallback_reason"])
+    return _edge_fallback(jobs, script, "elevenlabs")
 
 
 def _use_human_audio(src: str, dest: str) -> bool:

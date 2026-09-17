@@ -162,6 +162,73 @@ class Guards(Isolated):
         self.assertEqual(vo._script_chars(s), 80)
 
 
+class OneVoicePerVideo(Isolated):
+    """The reported bug: a 409 on the hook sent ONE line to edge-tts mid-video."""
+    def ok(self, text):
+        import base64
+        return Mock(status_code=200, headers={"character-cost": str(len(text) // 4)}, json=lambda: {
+            "audio_base64": base64.b64encode(bytes([255]) * 400).decode(),
+            "alignment": {"characters": list(text), "character_start_times_seconds": [i * .05 for i in range(len(text))],
+                          "character_end_times_seconds": [i * .05 + .05 for i in range(len(text))]}})
+
+    def conflict(self):
+        return Mock(status_code=409, headers={}, json=lambda: {"detail": {"status": "already_running"}})
+
+    def jobs(self, d, n=4):
+        return [{"type": "fact", "number": i, "text": f"segment number {i} here.", "path": str(Path(d) / f"f{i}.mp3")}
+                for i in range(n)]
+
+    def test_409_already_running_is_retried_not_failed(self):
+        with patch.dict(os.environ, {"ELEVENLABS_API_KEY": "k"}), patch("time.sleep"),                 patch.object(el.requests, "post", side_effect=[self.conflict(), self.ok("hello there you")]) as post:
+            marks, credits = el.synth("hello there you", str(Path(self.tmp.name) / "a.mp3"), "v", {}, {})
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(credits, 3.0)
+
+    def test_transient_failure_recovers_in_second_pass_all_elevenlabs(self):
+        calls = {"n": 0}
+        def flaky(text, path, voice, script, circuit):
+            calls["n"] += 1
+            if calls["n"] == 2:                      # the first parallel line fails once
+                raise RuntimeError("ElevenLabs HTTP 500")
+            Path(path).write_bytes(b"mp3")
+            return [{"text": text, "start": 0, "dur": 1}], 5.0
+        with tempfile.TemporaryDirectory() as d, patch.object(el, "synth", side_effect=flaky), patch("time.sleep"):
+            out = vo._run_jobs_elevenlabs(self.jobs(d), "voiceIDAAAAAAAAAAAAA", {"language": "Arabic"})
+        self.assertEqual({j["tts_engine"] for j, _ in out}, {"elevenlabs"})
+        self.assertEqual(len(out), 4)
+
+    def test_persistent_failure_revoices_whole_video_with_one_voice(self):
+        def one_bad(text, path, voice, script, circuit):
+            if "number 2" in text:
+                raise RuntimeError("ElevenLabs HTTP 500")
+            Path(path).write_bytes(b"mp3")
+            return [{"text": text, "start": 0, "dur": 1}], 5.0
+        with tempfile.TemporaryDirectory() as d, patch.object(el, "synth", side_effect=one_bad), patch("time.sleep"),                 patch.object(vo, "_run_jobs", side_effect=lambda jobs, voice: _fake_edge(jobs)):
+            out = vo._run_jobs_elevenlabs(self.jobs(d), "voiceIDAAAAAAAAAAAAA", {"language": "Arabic"})
+        self.assertEqual({j["tts_engine"] for j, _ in out}, {"edge"})
+        self.assertEqual(len(out), 4)
+        self.assertTrue(all("whole video" in j["tts_fallback_reason"] for j, _ in out))
+        self.assertTrue(all("tts_credits" not in j for j, _ in out))
+
+    def test_first_line_runs_alone_before_parallel_lines(self):
+        import threading
+        active, peak, first_done = {"n": 0}, {"n": 0}, threading.Event()
+        lock = threading.Lock()
+        def track(text, path, voice, script, circuit):
+            with lock:
+                active["n"] += 1
+                peak["first"] = peak.get("first", active["n"]) if "number 0" in text else peak.get("first", 0)
+            import time as _t
+            _t.sleep(0.05)
+            with lock:
+                active["n"] -= 1
+            Path(path).write_bytes(b"mp3")
+            return [{"text": text, "start": 0, "dur": 1}], 5.0
+        with tempfile.TemporaryDirectory() as d, patch.object(el, "synth", side_effect=track):
+            vo._run_jobs_elevenlabs(self.jobs(d), "voiceIDAAAAAAAAAAAAA", {"language": "Arabic"})
+        self.assertEqual(peak["first"], 1)           # nothing else was running during the warm-up line
+
+
 class Fallbacks(unittest.TestCase):
     def jobs(self, d):
         return [{"type": "fact", "number": i, "text": f"segment {i}", "path": str(Path(d) / f"f{i}.wav")} for i in range(3)]

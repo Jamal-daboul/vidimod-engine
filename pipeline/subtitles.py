@@ -108,9 +108,24 @@ _LATIN_ONLY_FONTS = {"Impact", "Arial Black", "Bahnschrift"}
 # Almarai / Changa / Reem Kufi / El Messiri) lack alef-isolated (U+FE8D) and
 # alef-hamza (U+FE83) — every alef rendered as a tofu box — and were removed.
 # A saved font name that is no longer in this set falls back to Noto Sans Arabic.
-_ARABIC_FONTS = {"Noto Sans Arabic", "Noto Kufi Arabic", "Noto Naskh Arabic",
-                 "IBM Plex Sans Arabic", "Amiri",
-                 "Droid Arabic Kufi", "Droid Arabic Naskh", "Vazirmatn",
+# Families renamed when their files were forged (" VM" = legacy presentation forms wired in).
+# Saved settings, plans and autopilot snapshots still carry the old names; map them so those
+# users get the fixed font instead of tofu boxes or a silent fallback. See ARABIC_FONTS.md.
+FONT_ALIASES = {
+    "IBM Plex Sans Arabic": "IBM Plex Sans Arabic VM",
+    "Droid Arabic Kufi": "Droid Arabic Kufi VM",
+    "Droid Arabic Naskh": "Droid Arabic Naskh VM",
+    "Cairo": "Cairo VM", "Tajawal": "Tajawal VM", "Almarai": "Almarai VM", "Changa": "Changa VM",
+    "El Messiri": "El Messiri VM", "Alexandria": "Alexandria VM", "Readex Pro": "Readex Pro VM",
+    "Zain": "Zain VM", "Beiruti": "Beiruti VM", "Mirza": "Mirza VM", "Katibeh": "Katibeh VM",
+    "Rakkas": "Rakkas VM", "Lalezar": "Lalezar VM", "Marhey": "Marhey VM", "Lemonada": "Lemonada VM",
+    "Baloo Bhaijaan 2": "Baloo Bhaijaan 2 VM", "Markazi Text": "Markazi Text VM",
+}
+
+_ARABIC_FONTS = {"Noto Sans Arabic", "Noto Kufi Arabic", "Noto Naskh Arabic", "Amiri", "Vazirmatn",
+                 # Forged 2026-09-17: the originals scored 15/16 (IBM Plex, no U+FEFF) and 13/16
+                 # (Droid, no U+FEFF/tashkil forms) → a box beside every lam-alef.
+                 "IBM Plex Sans Arabic VM", "Droid Arabic Kufi VM", "Droid Arabic Naskh VM",
                  # "VM" families: modern Google fonts forged in-house — the legacy
                  # presentation-form codepoints were wired (via HarfBuzz shaping
                  # discovery) onto each font's own positional glyphs, so they pass
@@ -246,7 +261,7 @@ def build_segment_ass(text: str, duration: float, style: str = "classic",
     if (not text and not words) or duration <= 0:
         return None
 
-    font  = font or "Noto Sans Arabic"
+    font  = FONT_ALIASES.get(font or "", font) or "Noto Sans Arabic"
     # Arabic/RTL: keep the user's chosen font IF it covers Arabic; otherwise fall back
     # to Noto Sans Arabic (complete coverage) so Arabic never renders stretched or as
     # tofu boxes. All these fonts ship in fonts/ and libass loads them via

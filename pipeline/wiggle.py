@@ -31,7 +31,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-VERSION = 1                       # bump to invalidate cached view sequences
+VERSION = 2                       # bump to invalidate cached view sequences
 ENGINE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = ENGINE_DIR / "models" / "depth-anything-v2-small" / "model.onnx"
 CACHE_DIR = ENGINE_DIR / "output" / "wiggle_cache"
@@ -41,9 +41,12 @@ CACHE_MAX_AGE_S = 12 * 3600
 # is farthest from the subject. The assemblers crop with >=12% headroom, so the stretched
 # border columns this creates are never on screen.
 AMPLITUDE = {"subtle": 0.008, "medium": 0.013, "strong": 0.02}
-# Ping-pong through four viewpoints: left, mid-left, mid-right, right, and back.
-VIEW_POSITIONS = (-1.0, -1.0 / 3, 1.0 / 3, 1.0, 1.0 / 3, -1.0 / 3)
-HOLD_SECONDS = 0.12               # each view holds ~3 frames at 25 fps (~1.4 Hz cycle)
+# Smooth sway: the viewpoint follows a sine over CYCLE_SECONDS with a new position on EVERY
+# frame. (v1 held 4 fixed viewpoints for 3 frames each — a classic wigglegram, but on video it
+# read as a low frame rate.) Positions are snapped to 1/POSITION_STEPS of the amplitude (well
+# under a pixel) so identical positions share one rendered view.
+CYCLE_SECONDS = 2.0
+POSITION_STEPS = 12               # 25 distinct views per image: -1 … +1 in 1/12 steps
 MAX_WARP_SIDE = 1920              # warp at <=1920px on the long side (output is 1080p)
 DEPTH_SHORT_SIDE = 518            # Depth Anything V2 native input size
 MEAN = (0.485, 0.456, 0.406)
@@ -113,9 +116,9 @@ def prepare_many(paths, fps: int = 25) -> None:
         return
     import concurrent.futures as cf
     t0 = time.time()
-    # Two workers: inference is serialized by _session_lock anyway; the second worker
-    # keeps warping/JPEG-encoding the previous image while the next one is inferred.
-    with cf.ThreadPoolExecutor(max_workers=2) as pool:
+    # Inference is serialized by _session_lock; the extra workers keep warping/encoding the
+    # (now ~25) views of earlier images while the next one is inferred.
+    with cf.ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda p: _pattern_for(p, fps), unique))
     with _state_lock:
         _stats["seconds"] += time.time() - t0
@@ -237,26 +240,26 @@ def _build_views(img_path: str, out_dir: Path, fps: int) -> None:
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True, exist_ok=True)
 
+    import math
+    n_frames = max(8, round(fps * CYCLE_SECONDS))
+    frame_pos = [round(math.sin(2 * math.pi * k / n_frames) * POSITION_STEPS) / POSITION_STEPS
+                 for k in range(n_frames)]
     view_files = {}
-    for p in sorted(set(VIEW_POSITIONS)):
+    for p in sorted(set(frame_pos)):
         sx = np.clip(xs - amp * p * rel, 0, W - 1.001)
         x0 = sx.astype(np.int32)
         wt = (sx - x0)[..., None]
         view = src[rows, x0] * (1.0 - wt) + src[rows, x0 + 1] * wt
         vf = tmp / f"view_{len(view_files)}.jpg"
-        Image.fromarray(np.clip(view + 0.5, 0, 255).astype(np.uint8)).save(vf, quality=95)
+        Image.fromarray(np.clip(view + 0.5, 0, 255).astype(np.uint8)).save(vf, quality=92)
         view_files[p] = vf
 
-    hold = max(1, round(fps * HOLD_SECONDS))
-    n = 0
-    for p in VIEW_POSITIONS:
-        for _ in range(hold):
-            dst = tmp / f"f_{n:03d}.jpg"
-            try:
-                os.link(view_files[p], dst)
-            except OSError:
-                shutil.copyfile(view_files[p], dst)
-            n += 1
+    for n, p in enumerate(frame_pos):
+        dst = tmp / f"f_{n:03d}.jpg"
+        try:
+            os.link(view_files[p], dst)
+        except OSError:
+            shutil.copyfile(view_files[p], dst)
 
     if out_dir.exists():                      # a parallel render built it first
         shutil.rmtree(tmp, ignore_errors=True)

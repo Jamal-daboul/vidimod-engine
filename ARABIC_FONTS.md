@@ -68,7 +68,14 @@ Diagnostics that were decisive:
   (`tools/forge_arabic_font.py`), and families renamed with a " VM" suffix
   (OFL reserved-font-name compliance for modified builds).
 - Naturally complete fonts (no forging needed): Noto Sans/Kufi/Naskh Arabic,
-  Amiri, IBM Plex Sans Arabic, Droid Arabic Kufi/Naskh, Vazirmatn.
+  Amiri, Vazirmatn. **Always run the audit instead of trusting a list:** IBM Plex Sans
+  Arabic (15/16 — no U+FEFF) and Droid Arabic Kufi/Naskh (13/16 — no U+FEFF, U+FE77,
+  U+FE7D) were listed here as complete and produced `لحماية ▯الأعمال` in production on
+  2026-09-17. They are now forged as "IBM Plex Sans Arabic VM" / "Droid Arabic Kufi VM" /
+  "Droid Arabic Naskh VM"; the unforged files were removed.
+- `FONT_ALIASES` (engine `subtitles.py` and backend `main.py`) maps old family names that
+  saved settings still carry ("IBM Plex Sans Arabic", "Cairo", …) to the forged " VM" family.
+  Add an alias whenever you forge a font that users may already have selected.
 
 ## Adding a new Arabic font (the only safe procedure)
 
