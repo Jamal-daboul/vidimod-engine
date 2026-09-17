@@ -39,10 +39,26 @@ LANG_VOICES = {
 }
 
 
+# Arabic scripts are written in the channel's spoken dialect (backend ARABIC_DIALECTS), so the
+# free narrator uses a native voice of that country. "white" / "fusha" / unset keep ar-SA.
+DIALECT_VOICES = {
+    "syrian":    {"male": "ar-SY-LaithNeural",  "female": "ar-SY-AmanyNeural"},
+    "lebanese":  {"male": "ar-LB-RamiNeural",   "female": "ar-LB-LaylaNeural"},
+    "egyptian":  {"male": "ar-EG-ShakirNeural", "female": "ar-EG-SalmaNeural"},
+    "saudi":     {"male": "ar-SA-HamedNeural",  "female": "ar-SA-ZariyahNeural"},
+    "gulf":      {"male": "ar-AE-HamdanNeural", "female": "ar-AE-FatimaNeural"},
+    "iraqi":     {"male": "ar-IQ-BasselNeural", "female": "ar-IQ-RanaNeural"},
+    "jordanian": {"male": "ar-JO-TaimNeural",   "female": "ar-JO-SanaNeural"},
+    "moroccan":  {"male": "ar-MA-JamalNeural",  "female": "ar-MA-MounaNeural"},
+}
+
+
 def _pick_voice(script: dict) -> str:
     lang = script.get("language", "English")
     sex  = (script.get("voice_sex") or "female").lower()
     pair = LANG_VOICES.get(lang, LANG_VOICES["English"])
+    if lang == "Arabic":
+        pair = DIALECT_VOICES.get(str(script.get("dialect") or "").lower(), pair)
     return pair.get(sex, pair["female"])
 
 

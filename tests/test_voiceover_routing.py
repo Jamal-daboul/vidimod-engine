@@ -229,6 +229,18 @@ class OneVoicePerVideo(Isolated):
         self.assertEqual(peak["first"], 1)           # nothing else was running during the warm-up line
 
 
+class DialectVoices(unittest.TestCase):
+    def test_arabic_dialect_picks_a_native_free_voice(self):
+        self.assertEqual(vo._pick_voice({"language": "Arabic", "dialect": "egyptian", "voice_sex": "male"}), "ar-EG-ShakirNeural")
+        self.assertEqual(vo._pick_voice({"language": "Arabic", "dialect": "syrian"}), "ar-SY-AmanyNeural")
+        self.assertEqual(vo._pick_voice({"language": "Arabic", "dialect": "gulf", "voice_sex": "male"}), "ar-AE-HamdanNeural")
+
+    def test_white_fusha_or_unknown_keep_saudi_and_other_languages_ignore_dialect(self):
+        for d in ("white", "fusha", "", None, "klingon"):
+            self.assertEqual(vo._pick_voice({"language": "Arabic", "dialect": d, "voice_sex": "male"}), "ar-SA-HamedNeural")
+        self.assertEqual(vo._pick_voice({"language": "Turkish", "dialect": "egyptian", "voice_sex": "female"}), "tr-TR-EmelNeural")
+
+
 class Fallbacks(unittest.TestCase):
     def jobs(self, d):
         return [{"type": "fact", "number": i, "text": f"segment {i}", "path": str(Path(d) / f"f{i}.wav")} for i in range(3)]
