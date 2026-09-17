@@ -31,7 +31,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-VERSION = 2                       # bump to invalidate cached view sequences
+VERSION = 3                       # bump to invalidate cached view sequences
 ENGINE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL = ENGINE_DIR / "models" / "depth-anything-v2-small" / "model.onnx"
 CACHE_DIR = ENGINE_DIR / "output" / "wiggle_cache"
@@ -45,7 +45,7 @@ AMPLITUDE = {"subtle": 0.008, "medium": 0.013, "strong": 0.02}
 # frame. (v1 held 4 fixed viewpoints for 3 frames each — a classic wigglegram, but on video it
 # read as a low frame rate.) Positions are snapped to 1/POSITION_STEPS of the amplitude (well
 # under a pixel) so identical positions share one rendered view.
-CYCLE_SECONDS = 2.0
+CYCLE_SECONDS = 1.3               # 2.0 looked smooth but slow to Jamal; 1.3 = a bit faster
 POSITION_STEPS = 12               # 25 distinct views per image: -1 … +1 in 1/12 steps
 MAX_WARP_SIDE = 1920              # warp at <=1920px on the long side (output is 1080p)
 DEPTH_SHORT_SIDE = 518            # Depth Anything V2 native input size
