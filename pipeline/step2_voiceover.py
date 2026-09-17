@@ -53,13 +53,43 @@ DIALECT_VOICES = {
 }
 
 
-def _pick_voice(script: dict) -> str:
+def _base_voice(script: dict) -> str:
     lang = script.get("language", "English")
     sex  = (script.get("voice_sex") or "female").lower()
     pair = LANG_VOICES.get(lang, LANG_VOICES["English"])
-    if lang == "Arabic":
-        pair = DIALECT_VOICES.get(str(script.get("dialect") or "").lower(), pair)
     return pair.get(sex, pair["female"])
+
+
+def _pick_voice(script: dict) -> str:
+    if script.get("language", "English") == "Arabic":
+        pair = DIALECT_VOICES.get(str(script.get("dialect") or "").lower())
+        if pair:
+            return pair.get((script.get("voice_sex") or "female").lower(), pair["female"])
+    return _base_voice(script)
+
+
+def _run_jobs_edge(jobs: list, voice: str, script: dict) -> list:
+    """edge-tts for the whole video with ONE voice. The regional dialect voices are less
+    reliable than ar-SA (edge sometimes answers a line with no audio at all), so if the
+    dialect voice still misses any line after its retries, the WHOLE video is re-voiced with
+    the language's standard voice — never a dropped line, never a narrator switch."""
+    out = asyncio.run(_run_jobs(jobs, voice))
+    base = _base_voice(script)
+    missing = sum(1 for _job, words in out if words is None)
+    if missing and voice != base:
+        reason = (f"Dialect voice {voice} failed on {missing}/{len(jobs)} line(s) → "
+                  f"whole video re-voiced with {base}")
+        log.error(reason)
+        for job in jobs:
+            try: Path(job["path"]).unlink()
+            except Exception: pass
+        out = asyncio.run(_run_jobs(jobs, base))
+        voice = base
+        for job, _w in out:
+            job["tts_fallback_reason"] = reason
+    for job, _w in out:
+        job["tts_engine"], job["tts_model"] = "edge", voice
+    return out
 
 
 # ── Google Cloud TTS (Chirp3-HD) — premium Arabic/Turkish/multilingual narration ──
@@ -381,10 +411,7 @@ def _edge_fallback(jobs: list, script: dict, failed_engine: str) -> list:
     for job in jobs:
         job["path"] = str(Path(job["path"]).with_suffix(".mp3"))
     log.warning(f"{failed_engine} failed for {len(jobs)} segment(s) → edge-tts ({edge_voice})")
-    out = asyncio.run(_run_jobs(jobs, edge_voice))
-    for job, _words in out:
-        job["tts_engine"], job["tts_model"] = "edge", edge_voice
-    return out
+    return _run_jobs_edge(jobs, edge_voice, script)
 
 
 def _run_jobs_elevenlabs(jobs: list, voice_id: str, script: dict) -> list:
@@ -522,9 +549,8 @@ def run(script: dict) -> dict:
     elif engine == "elevenlabs":
         results = _run_jobs_elevenlabs(tts_jobs, voice, script)
     else:
-        results = asyncio.run(_run_jobs(tts_jobs, voice))
-        for job, _w in results:
-            job["tts_engine"], job["tts_model"] = "edge", voice
+        results = _run_jobs_edge(tts_jobs, voice, script)
+        script["tts_voice"] = results[0][0]["tts_model"] if results else voice
     done = {id(job): words for job, words in results}
 
     # Reassemble in the original segment order (human + AI), so the timeline lines up.

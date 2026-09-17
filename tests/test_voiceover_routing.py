@@ -240,6 +240,34 @@ class DialectVoices(unittest.TestCase):
             self.assertEqual(vo._pick_voice({"language": "Arabic", "dialect": d, "voice_sex": "male"}), "ar-SA-HamedNeural")
         self.assertEqual(vo._pick_voice({"language": "Turkish", "dialect": "egyptian", "voice_sex": "female"}), "tr-TR-EmelNeural")
 
+    def test_dialect_voice_missing_a_line_revoices_whole_video_with_standard_voice(self):
+        calls = []
+
+        async def fake_run(jobs, voice):
+            calls.append(voice)
+            out = _fake_edge(jobs)
+            if voice == "ar-SY-LaithNeural":          # edge gives no audio for one line
+                out[1] = (out[1][0], None)
+            return out
+        script = {"language": "Arabic", "dialect": "syrian", "voice_sex": "male"}
+        with tempfile.TemporaryDirectory() as d, patch.object(vo, "_run_jobs", side_effect=fake_run):
+            jobs = [{"type": "fact", "number": i, "text": f"line {i}", "path": str(Path(d) / f"f{i}.mp3")} for i in range(3)]
+            out = vo._run_jobs_edge(jobs, vo._pick_voice(script), script)
+        self.assertEqual(calls, ["ar-SY-LaithNeural", "ar-SA-HamedNeural"])
+        self.assertTrue(all(words is not None for _j, words in out))
+        self.assertEqual({j["tts_model"] for j, _w in out}, {"ar-SA-HamedNeural"})
+        self.assertIn("re-voiced", out[0][0]["tts_fallback_reason"])
+
+    def test_dialect_voice_that_works_is_kept(self):
+        async def fake_run(jobs, voice):
+            return _fake_edge(jobs)
+        script = {"language": "Arabic", "dialect": "egyptian", "voice_sex": "female"}
+        with tempfile.TemporaryDirectory() as d, patch.object(vo, "_run_jobs", side_effect=fake_run):
+            jobs = [{"type": "hook", "text": "x", "path": str(Path(d) / "h.mp3")}]
+            out = vo._run_jobs_edge(jobs, vo._pick_voice(script), script)
+        self.assertEqual(out[0][0]["tts_model"], "ar-EG-SalmaNeural")
+        self.assertNotIn("tts_fallback_reason", out[0][0])
+
 
 class Fallbacks(unittest.TestCase):
     def jobs(self, d):
