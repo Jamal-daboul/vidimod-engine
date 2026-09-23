@@ -251,6 +251,23 @@ def _script_chars(script: dict) -> int:
 
 
 def _resolve_engine(script: dict):
+    """Production narration uses ElevenLabs only, even for stale saved engine choices."""
+    from pipeline import tts_elevenlabs as el
+    script["tts_engine"] = "elevenlabs"
+    script["tts_provider"] = "elevenlabs"
+    if not el.api_key():
+        raise RuntimeError("ElevenLabs narration unavailable: API key is not configured.")
+    vid = el.resolve_voice(script)
+    if not vid:
+        raise RuntimeError("ElevenLabs narration unavailable: no narrator is configured.")
+    ok, why, est = el.preflight(_script_chars(script), script)
+    if not ok:
+        raise RuntimeError(f"ElevenLabs narration stopped: {why}")
+    log.info(f"TTS engine=elevenlabs voice={vid} model={el.model(script)} est_credits={est:.0f}")
+    return "elevenlabs", vid, ".mp3"
+
+
+def _resolve_legacy_engine(script: dict):
     """Decide which TTS engine to use. Returns (engine, voice, ext).
 
     English  -> Kokoro local TTS (more natural, offline) when available.
@@ -421,9 +438,7 @@ def _run_jobs_elevenlabs(jobs: list, voice_id: str, script: dict) -> list:
        (409 already_running) while it loads — that once sent a hook to edge-tts.
     2. The rest run with bounded concurrency; lines that still failed get one more
        sequential try.
-    3. If any line is still missing, the WHOLE video is re-voiced with edge-tts, so a
-       viewer never hears the narrator change mid-video. Credits already spent on the
-       ElevenLabs lines are lost (rare), and the user is not billed for them."""
+    3. If any line is still missing, stop the render. Never substitute a free voice."""
     import concurrent.futures as cf
     import time as _time
     from pipeline import tts_elevenlabs as el
@@ -465,13 +480,8 @@ def _run_jobs_elevenlabs(jobs: list, voice_id: str, script: dict) -> list:
     if not failed:
         return [done[id(j)] for j in jobs]
     reason = next(iter(failed.values()))[1]
-    for job in jobs:
-        job["tts_fallback_reason"] = (f"ElevenLabs failed on {len(failed)}/{len(jobs)} line(s) ({reason}) → "
-                                      "whole video re-voiced with the free voice so the narrator never changes")
-        for k in ("tts_voice", "tts_credits"):
-            job.pop(k, None)
-    log.error(jobs[0]["tts_fallback_reason"])
-    return _edge_fallback(jobs, script, "elevenlabs")
+    raise RuntimeError(f"ElevenLabs narration failed for {len(failed)}/{len(jobs)} segments: {reason}. "
+                       "No alternate voice provider was used.")
 
 
 def _use_human_audio(src: str, dest: str) -> bool:

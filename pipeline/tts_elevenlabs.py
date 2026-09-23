@@ -22,7 +22,7 @@ Spending safety, mirroring the backend text gateway:
     (ElevenLabs rejects a parallel request while it is still loading a cold library voice).
   * An account/billing/permission error opens a circuit for the rest of the render
     instead of failing once per segment.
-The caller falls back to free edge-tts for any segment this module can't produce.
+The caller stops the render if narration fails; alternate providers are disabled.
 """
 
 import base64
